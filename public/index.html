@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LeetCode Admin Dashboard</title>
+  <script>try{document.documentElement.setAttribute('data-theme',localStorage.getItem('lc_theme')||'dark')}catch(e){}</script>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div id="adminLogin" class="admin-login">
+    <div class="admin-login-box">
+      <div style="font-size:34px;text-align:center">⚡</div>
+      <h2 style="text-align:center;margin:6px 0 4px">Admin sign in</h2>
+      <p class="hint" style="text-align:center;margin-top:0">Enter the admin password to manage the dashboard.</p>
+      <input id="adminPass" type="password" placeholder="Admin password" autocomplete="current-password" style="width:100%;margin-top:8px" />
+      <button id="adminLoginBtn" class="btn btn-primary" style="width:100%;margin-top:10px">Sign in</button>
+      <div id="adminLoginMsg" class="msg" style="text-align:center"></div>
+    </div>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⚡</span>
+      <div>
+        <h1>LeetCode Progress</h1>
+        <p class="sub">Admin dashboard</p>
+      </div>
+    </div>
+    <div class="college-picker">
+      <label>College</label>
+      <select id="collegeSelect"></select>
+      <button id="syncCollegeBtn" class="btn btn-ghost" title="Refresh all students from LeetCode now">⟳ Sync now</button>
+      <a href="/student" target="_blank" class="btn btn-ghost" title="Open the student-facing view">Student view ↗</a>
+      <button id="themeToggle" class="btn btn-ghost" title="Toggle light / dark">☀️</button>
+      <button id="adminLogout" class="btn btn-ghost" title="Lock the admin dashboard" style="display:none">🔒 Lock</button>
+      <span id="syncStatus" class="sync-status"></span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="dashboard">Dashboard</button>
+    <button class="tab" data-tab="practice">Practice</button>
+    <button class="tab" data-tab="colleges">Colleges</button>
+    <button class="tab" data-tab="upload">Upload</button>
+  </nav>
+
+  <main>
+    <!-- DASHBOARD -->
+    <section id="tab-dashboard" class="tab-panel active">
+      <div class="panel" id="accessPanel" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div>
+          <h2 style="margin:0">Student access code</h2>
+          <p class="hint" style="margin:2px 0 0">Students need this code to log into the student view for this college.</p>
+        </div>
+        <div class="row" style="margin:0 0 0 auto;">
+          <input id="accessCode" class="search" placeholder="e.g. ABC-2026" style="width:180px" />
+          <button id="saveCodeBtn" class="btn btn-primary">Save code</button>
+          <span id="accessMsg" class="msg" style="margin:0"></span>
+        </div>
+      </div>
+      <div class="cards" id="summaryCards"></div>
+      <div class="panel">
+        <h2>Monthly submission activity <span class="hint">(whole college)</span></h2>
+        <canvas id="monthlyChart" height="90"></canvas>
+      </div>
+      <div class="panel">
+        <div class="panel-head" style="flex-wrap:wrap;gap:8px">
+          <h2>Students</h2>
+          <div class="row" style="margin:0;gap:8px;flex-wrap:wrap">
+            <select id="filterCampus" class="filter-sel"><option value="">All campuses</option></select>
+            <select id="filterDept" class="filter-sel"><option value="">All departments</option></select>
+            <select id="filterBatch" class="filter-sel"><option value="">All batches</option></select>
+            <input id="studentSearch" class="search" placeholder="Search name / username / reg no…" style="width:200px" />
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="studentTable">
+            <thead>
+              <tr>
+                <th>#</th><th>Student</th><th>Global rank</th><th>Easy · Medium · Hard</th>
+                <th>Total</th><th>Practice</th><th>Synced</th><th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="row" id="pager" style="justify-content:flex-end;gap:12px;margin-top:12px">
+          <span id="pageInfo" class="hint"></span>
+          <button id="prevPage" class="btn btn-sm btn-ghost">‹ Prev</button>
+          <button id="nextPage" class="btn btn-sm btn-ghost">Next ›</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- PRACTICE -->
+    <section id="tab-practice" class="tab-panel">
+      <div class="panel">
+        <h2>Assign practice problems</h2>
+        <datalist id="topicList"></datalist>
+
+        <label class="field" style="max-width:320px">
+          <span>College these questions belong to</span>
+          <select id="practiceCollege"></select>
+        </label>
+
+        <h2 style="font-size:13px;margin:18px 0 8px">Add a single question</h2>
+        <div class="row" style="margin-top:0">
+          <input id="singleLink" class="search" placeholder="LeetCode link or slug" style="flex:2;min-width:200px" />
+          <input id="singleTopic" class="search" list="topicList" placeholder="Topic" style="flex:1;min-width:120px" />
+          <select id="singleDifficulty" style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 10px">
+            <option value="">Difficulty…</option>
+            <option>Easy</option><option>Medium</option><option>Hard</option>
+          </select>
+          <button id="addSingleBtn" class="btn btn-primary">Add question</button>
+          <span id="singleMsg" class="msg" style="margin:0"></span>
+        </div>
+
+        <h2 style="font-size:13px;margin:22px 0 8px">Add many at once</h2>
+        <p class="hint">Pick or type a <b>topic</b> and a <b>difficulty</b>, then paste LeetCode links (one per line) — all added under that topic and difficulty. Or upload an Excel file with <code>URL</code> (and optionally <code>Topic</code>, <code>Difficulty</code>) columns, which override these.</p>
+        <div class="row" style="margin-top:0">
+          <input id="practiceTopic" class="search" list="topicList" placeholder="Topic (e.g. Arrays)" style="flex:1;min-width:160px" />
+          <select id="practiceDifficulty" style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 10px">
+            <option value="">Difficulty (optional)…</option>
+            <option>Easy</option><option>Medium</option><option>Hard</option>
+          </select>
+        </div>
+        <textarea id="practiceLinks" rows="4" placeholder="https://leetcode.com/problems/two-sum/&#10;https://leetcode.com/problems/valid-parentheses/"></textarea>
+        <div class="row">
+          <button id="addPracticeBtn" class="btn btn-primary">Add problems</button>
+          <label class="btn btn-ghost file-btn">⬆ Upload Excel<input type="file" id="practiceFile" accept=".xlsx,.xls,.csv" hidden /></label>
+          <a href="/api/practice-template" download class="btn btn-ghost">⬇ Download template</a>
+          <span id="practiceMsg" class="msg"></span>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Assigned problems &amp; completion</h2>
+        <div class="table-wrap">
+          <table id="practiceTable">
+            <thead><tr><th>Problem</th><th>Difficulty</th><th>Solved by</th><th>Progress</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- COLLEGES -->
+    <section id="tab-colleges" class="tab-panel">
+      <div class="panel narrow">
+        <h2>Add a college</h2>
+        <p class="hint">Create a college and set the access code students type to log in. <b>Then upload that college's roster in the Upload tab</b> — students log in by picking their name, so a code with no roster has no one to pick.</p>
+        <label class="field"><span>College name</span><input id="newCollegeName" placeholder="e.g. ABC Engineering College" /></label>
+        <label class="field"><span>Student access code</span><input id="newCollegeCode" placeholder="e.g. ABC-2026" /></label>
+        <button id="addCollegeBtn" class="btn btn-primary">Add college</button>
+        <div id="addCollegeMsg" class="msg"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Colleges</h2>
+          <span class="hint">Student login page: <a id="studentLink" href="/student" target="_blank">/student</a></span>
+        </div>
+        <div class="table-wrap">
+          <table id="collegeTable">
+            <thead><tr><th>College</th><th>Students</th><th>Access code</th><th>Set / replace code</th><th>Read-only link</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="hint">For security the saved code isn't shown — you can only overwrite it. Share the code you set with that college's students.</p>
+      </div>
+    </section>
+
+    <!-- UPLOAD -->
+    <section id="tab-upload" class="tab-panel">
+      <div class="panel narrow">
+        <h2>Upload student roster</h2>
+        <p class="hint">Excel needs <code>Student Name</code> and <code>LeetCode URL</code>. Optional columns are used for filtering: <code>Register Number</code>, <code>Email ID</code>, <code>Department</code>, <code>Section</code> (batch), <code>Year</code>, <code>Campus name</code>. <a href="/api/template" download>Download template</a>. Don't see your college? Add it in the <b>Colleges</b> tab first.</p>
+        <label class="field">
+          <span>College</span>
+          <select id="uploadCollege"></select>
+        </label>
+        <label class="field">
+          <span>Excel file</span>
+          <input type="file" id="rosterFile" accept=".xlsx,.xls,.csv" />
+        </label>
+        <button id="uploadBtn" class="btn btn-primary">Upload &amp; sync</button>
+        <div id="uploadResult" class="msg"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Student detail drawer -->
+  <div id="drawer" class="drawer">
+    <div class="drawer-inner">
+      <button class="drawer-close" id="drawerClose">✕</button>
+      <div id="drawerContent"></div>
+    </div>
+  </div>
+  <div id="drawerBackdrop" class="backdrop"></div>
+
+  <footer class="foot">
+    Data scraped from public LeetCode profiles via an unofficial endpoint — best-effort, not real-time.
+  </footer>
+
+  <script>
+    (function () {
+      var root = document.documentElement, btn = document.getElementById('themeToggle');
+      function icon() { if (btn) btn.textContent = root.getAttribute('data-theme') === 'light' ? '🌙' : '☀️'; }
+      icon();
+      if (btn) btn.addEventListener('click', function () {
+        var t = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+        root.setAttribute('data-theme', t);
+        try { localStorage.setItem('lc_theme', t); } catch (e) {}
+        icon();
+        if (window.__onTheme) window.__onTheme();
+      });
+    })();
+  </script>
+  <script src="app.js"></script>
+</body>
+</html>

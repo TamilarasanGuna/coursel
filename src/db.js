@@ -1,0 +1,401 @@
+import { randomUUID } from 'node:crypto';
+import { db } from './sqlite.js';
+export { db };
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS colleges (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS students (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    college_id    INTEGER NOT NULL REFERENCES colleges(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    username      TEXT NOT NULL,
+    profile_url   TEXT,
+    ranking       INTEGER,
+    contest_rating INTEGER,
+    solved_easy   INTEGER DEFAULT 0,
+    solved_medium INTEGER DEFAULT 0,
+    solved_hard   INTEGER DEFAULT 0,
+    solved_total  INTEGER DEFAULT 0,
+    found         INTEGER DEFAULT 1,          -- 0 if profile not found / private
+    sync_status   TEXT DEFAULT 'pending',     -- pending | ok | error
+    sync_error    TEXT,
+    last_synced_at TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(college_id, username)
+  );
+
+  -- Monthly submission activity derived from the LeetCode submission calendar.
+  CREATE TABLE IF NOT EXISTS monthly_activity (
+    student_id  INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    ym          TEXT NOT NULL,                -- 'YYYY-MM'
+    submissions INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (student_id, ym)
+  );
+
+  -- Periodic snapshots of solved-by-difficulty totals so per-month *solved*
+  -- growth can be computed by diffing snapshots over time.
+  CREATE TABLE IF NOT EXISTS stat_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id  INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    taken_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    solved_easy INTEGER, solved_medium INTEGER, solved_hard INTEGER, solved_total INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS practice_problems (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    college_id  INTEGER NOT NULL REFERENCES colleges(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL,
+    slug        TEXT NOT NULL,
+    url         TEXT NOT NULL,
+    difficulty  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(college_id, slug)
+  );
+
+  CREATE TABLE IF NOT EXISTS practice_completions (
+    student_id        INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    problem_id        INTEGER NOT NULL REFERENCES practice_problems(id) ON DELETE CASCADE,
+    completed_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    solved_timestamp  INTEGER,
+    PRIMARY KEY (student_id, problem_id)
+  );
+`);
+
+// ---- Migrations -------------------------------------------------------------
+
+// Add colleges.access_code if it doesn't exist yet (student-login gate).
+const collegeCols = db.prepare('PRAGMA table_info(colleges)').all();
+if (!collegeCols.some((c) => c.name === 'access_code')) {
+  db.exec('ALTER TABLE colleges ADD COLUMN access_code TEXT');
+}
+if (!collegeCols.some((c) => c.name === 'view_token')) {
+  db.exec('ALTER TABLE colleges ADD COLUMN view_token TEXT');
+}
+const problemCols = db.prepare('PRAGMA table_info(practice_problems)').all();
+if (!problemCols.some((c) => c.name === 'topic')) {
+  db.exec('ALTER TABLE practice_problems ADD COLUMN topic TEXT');
+}
+// Baseline = the stats captured on a student's FIRST successful sync, so we can
+// show progress (current minus baseline) on every sync afterwards.
+const studentCols = db.prepare('PRAGMA table_info(students)').all();
+for (const col of ['baseline_ranking', 'baseline_easy', 'baseline_medium', 'baseline_hard', 'baseline_total']) {
+  if (!studentCols.some((c) => c.name === col)) db.exec(`ALTER TABLE students ADD COLUMN ${col} INTEGER`);
+}
+if (!studentCols.some((c) => c.name === 'baseline_at')) {
+  db.exec('ALTER TABLE students ADD COLUMN baseline_at TEXT');
+}
+// Roster metadata columns.
+for (const col of ['register_number', 'email', 'department', 'section', 'year', 'campus']) {
+  if (!studentCols.some((c) => c.name === col)) db.exec(`ALTER TABLE students ADD COLUMN ${col} TEXT`);
+}
+
+// No-op for SQLite (schema is created at import above). Mirrors pgstore's API.
+export async function initStore() {
+  console.log('[db] driver: sqlite');
+}
+
+// ---- College helpers --------------------------------------------------------
+
+export async function getOrCreateCollege(name) {
+  const clean = String(name).trim();
+  db.prepare('INSERT OR IGNORE INTO colleges(name) VALUES (?)').run(clean);
+  return db.prepare('SELECT * FROM colleges WHERE name = ?').get(clean);
+}
+
+// Public-safe list (never exposes the access code).
+export const listColleges = async () =>
+  db.prepare(
+    `SELECT c.id, c.name, c.created_at,
+       CASE WHEN c.access_code IS NOT NULL AND c.access_code != '' THEN 1 ELSE 0 END AS has_code,
+       (SELECT COUNT(*) FROM students s WHERE s.college_id = c.id) AS student_count
+     FROM colleges c ORDER BY c.name`
+  ).all();
+
+export const getCollege = async (id) => db.prepare('SELECT * FROM colleges WHERE id = ?').get(id);
+
+// Deletes the college and cascades to its students, practice problems,
+// completions and snapshots (FK ON DELETE CASCADE + PRAGMA foreign_keys=ON).
+export const deleteCollege = async (id) => db.prepare('DELETE FROM colleges WHERE id = ?').run(id);
+
+export const setAccessCode = async (id, code) =>
+  db.prepare('UPDATE colleges SET access_code = ? WHERE id = ?').run((code || '').trim(), id);
+
+export async function checkAccessCode(id, code) {
+  const c = await getCollege(id);
+  if (!c || !c.access_code) return false;
+  return String(code || '').trim() === String(c.access_code).trim();
+}
+
+// Read-only share link (unguessable token per college).
+export const getCollegeByToken = async (t) =>
+  t ? db.prepare('SELECT * FROM colleges WHERE view_token = ?').get(t) : undefined;
+
+export async function ensureViewToken(id, regenerate = false) {
+  const c = await getCollege(id);
+  if (!c) return null;
+  if (c.view_token && !regenerate) return c.view_token;
+  const token = randomUUID();
+  db.prepare('UPDATE colleges SET view_token = ? WHERE id = ?').run(token, id);
+  return token;
+}
+
+// Names only — for the student login name-picker (no stats leaked).
+export const studentsBasic = async (collegeId) =>
+  db.prepare('SELECT id, name, username FROM students WHERE college_id = ? ORDER BY name')
+    .all(collegeId);
+
+// ---- Student helpers --------------------------------------------------------
+
+export async function upsertStudent({
+  college_id, name, username, profile_url,
+  register_number = null, email = null, department = null, section = null, year = null, campus = null,
+}) {
+  const stmt = db.prepare(`
+    INSERT INTO students (college_id, name, username, profile_url, register_number, email, department, section, year, campus)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(college_id, username) DO UPDATE SET
+      name = excluded.name,
+      profile_url     = COALESCE(excluded.profile_url, profile_url),
+      register_number = COALESCE(excluded.register_number, register_number),
+      email           = COALESCE(excluded.email, email),
+      department      = COALESCE(excluded.department, department),
+      section         = COALESCE(excluded.section, section),
+      year            = COALESCE(excluded.year, year),
+      campus          = COALESCE(excluded.campus, campus)
+    RETURNING id`);
+  return stmt.get(college_id, name, username, profile_url, register_number, email, department, section, year, campus).id;
+}
+
+export const listStudents = async (collegeId) =>
+  db.prepare('SELECT * FROM students WHERE college_id = ? ORDER BY solved_total DESC, name')
+    .all(collegeId);
+
+// Build a WHERE clause + params for the student filters (batch/dept/campus/search).
+function studentWhere(collegeId, f = {}) {
+  const cond = ['college_id = ?'];
+  const params = [collegeId];
+  if (f.batch) { cond.push('section = ?'); params.push(f.batch); }
+  if (f.department) { cond.push('department = ?'); params.push(f.department); }
+  if (f.campus) { cond.push('campus = ?'); params.push(f.campus); }
+  if (f.q) {
+    cond.push('(name LIKE ? OR username LIKE ? OR register_number LIKE ?)');
+    const l = '%' + f.q + '%';
+    params.push(l, l, l);
+  }
+  return { where: cond.join(' AND '), params };
+}
+
+// Paginated + filtered student list. Returns { rows, total, offset }.
+export async function getStudentsPage(collegeId, f = {}) {
+  const { where, params } = studentWhere(collegeId, f);
+  const pageSize = Math.min(500, Math.max(1, f.pageSize || 100));
+  const page = Math.max(1, f.page || 1);
+  const offset = (page - 1) * pageSize;
+  const total = db.prepare(`SELECT COUNT(*) AS c FROM students WHERE ${where}`).get(...params).c;
+  const rows = db
+    .prepare(`SELECT * FROM students WHERE ${where} ORDER BY solved_total DESC, name LIMIT ? OFFSET ?`)
+    .all(...params, pageSize, offset);
+  return { rows, total, offset };
+}
+
+export async function getCollegeTotals(collegeId, f = {}) {
+  const { where, params } = studentWhere(collegeId, f);
+  return db.prepare(`
+    SELECT COUNT(*) AS students,
+      COALESCE(SUM(solved_easy),0) AS easy,
+      COALESCE(SUM(solved_medium),0) AS medium,
+      COALESCE(SUM(solved_hard),0) AS hard,
+      COALESCE(SUM(solved_total),0) AS total
+    FROM students WHERE ${where}`).get(...params);
+}
+
+export async function getCollegeMonthly(collegeId, f = {}) {
+  const { where, params } = studentWhere(collegeId, f);
+  return db.prepare(`
+    SELECT ym, SUM(submissions) AS submissions
+    FROM monthly_activity JOIN students ON students.id = monthly_activity.student_id
+    WHERE ${where} GROUP BY ym ORDER BY ym`).all(...params);
+}
+
+export async function getFilterOptions(collegeId) {
+  const distinct = (col) =>
+    db.prepare(`SELECT DISTINCT ${col} AS v FROM students WHERE college_id=? AND ${col} IS NOT NULL AND ${col}<>'' ORDER BY ${col}`)
+      .all(collegeId).map((r) => r.v);
+  return { batches: distinct('section'), departments: distinct('department'), campuses: distinct('campus') };
+}
+
+export const getAllStudents = async () => db.prepare('SELECT * FROM students').all();
+// A student's rank within their college by total solved (ties share a rank).
+export const getRankInCollege = async (collegeId, solvedTotal) =>
+  db.prepare('SELECT COUNT(*) AS c FROM students WHERE college_id=? AND solved_total > ?')
+    .get(collegeId, solvedTotal).c + 1;
+export const getStudent = async (id) => db.prepare('SELECT * FROM students WHERE id = ?').get(id);
+export const getStudentByUsername = async (collegeId, username) =>
+  db.prepare('SELECT * FROM students WHERE college_id=? AND username=?').get(collegeId, username);
+export const getStudentByEmail = async (collegeId, email) =>
+  db.prepare('SELECT * FROM students WHERE college_id=? AND LOWER(email)=LOWER(?)').get(collegeId, String(email).trim());
+export const deleteStudent = async (id) => db.prepare('DELETE FROM students WHERE id = ?').run(id);
+
+export async function saveStudentStats(id, stats) {
+  if (!stats.found) {
+    db.prepare(
+      `UPDATE students SET found=0, sync_status='error',
+       sync_error='Profile not found or private', last_synced_at=datetime('now') WHERE id=?`
+    ).run(id);
+    return;
+  }
+  db.prepare(`
+    UPDATE students SET
+      found=1, ranking=?, contest_rating=?,
+      solved_easy=?, solved_medium=?, solved_hard=?, solved_total=?,
+      baseline_ranking=COALESCE(baseline_ranking, ?),
+      baseline_easy=COALESCE(baseline_easy, ?),
+      baseline_medium=COALESCE(baseline_medium, ?),
+      baseline_hard=COALESCE(baseline_hard, ?),
+      baseline_total=COALESCE(baseline_total, ?),
+      baseline_at=COALESCE(baseline_at, datetime('now')),
+      sync_status='ok', sync_error=NULL, last_synced_at=datetime('now')
+    WHERE id=?`).run(
+    stats.ranking ?? null,
+    stats.contestRating ?? null,
+    stats.solved.easy,
+    stats.solved.medium,
+    stats.solved.hard,
+    stats.solved.total,
+    stats.ranking ?? null,
+    stats.solved.easy,
+    stats.solved.medium,
+    stats.solved.hard,
+    stats.solved.total,
+    id
+  );
+
+  db.prepare(
+    `INSERT INTO stat_snapshots(student_id, solved_easy, solved_medium, solved_hard, solved_total)
+     VALUES (?,?,?,?,?)`
+  ).run(id, stats.solved.easy, stats.solved.medium, stats.solved.hard, stats.solved.total);
+
+  // Roll the submission calendar up into monthly buckets.
+  const monthly = {};
+  for (const [ts, count] of Object.entries(stats.submissionCalendar || {})) {
+    const d = new Date(Number(ts) * 1000);
+    const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    monthly[ym] = (monthly[ym] || 0) + Number(count);
+  }
+  const up = db.prepare(`
+    INSERT INTO monthly_activity(student_id, ym, submissions) VALUES (?,?,?)
+    ON CONFLICT(student_id, ym) DO UPDATE SET submissions=excluded.submissions`);
+  const entries = Object.entries(monthly);
+  db.exec('BEGIN');
+  try {
+    for (const [ym, count] of entries) up.run(id, ym, count);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+// Re-anchor a student's baseline to their CURRENT stats (start a fresh
+// progress-measurement period from now).
+export async function resetBaseline(id) {
+  db.prepare(`UPDATE students SET
+    baseline_ranking=ranking, baseline_easy=solved_easy, baseline_medium=solved_medium,
+    baseline_hard=solved_hard, baseline_total=solved_total, baseline_at=datetime('now')
+    WHERE id=?`).run(id);
+}
+
+export async function setSyncError(id, message) {
+  db.prepare(
+    `UPDATE students SET sync_status='error', sync_error=?, last_synced_at=datetime('now') WHERE id=?`
+  ).run(message, id);
+}
+
+export const getMonthlyActivity = async (studentId) =>
+  db.prepare('SELECT ym, submissions FROM monthly_activity WHERE student_id=? ORDER BY ym')
+    .all(studentId);
+
+// Per-month *solved* growth by difficulty, computed from snapshot diffs.
+// Returns [{ ym, easy, medium, hard, total }] — only months with >=2 snapshots
+// or a prior baseline produce meaningful numbers.
+export async function getMonthlySolvedGrowth(studentId) {
+  const snaps = db
+    .prepare('SELECT taken_at, solved_easy, solved_medium, solved_hard, solved_total FROM stat_snapshots WHERE student_id=? ORDER BY taken_at')
+    .all(studentId);
+  if (snaps.length < 2) return [];
+  // last snapshot per month
+  const lastByMonth = new Map();
+  for (const s of snaps) {
+    const ym = s.taken_at.slice(0, 7);
+    lastByMonth.set(ym, s);
+  }
+  const months = [...lastByMonth.keys()].sort();
+  const out = [];
+  let prev = snaps[0];
+  for (const ym of months) {
+    const cur = lastByMonth.get(ym);
+    out.push({
+      ym,
+      easy: Math.max(0, cur.solved_easy - prev.solved_easy),
+      medium: Math.max(0, cur.solved_medium - prev.solved_medium),
+      hard: Math.max(0, cur.solved_hard - prev.solved_hard),
+      total: Math.max(0, cur.solved_total - prev.solved_total),
+    });
+    prev = cur;
+  }
+  return out;
+}
+
+// ---- Practice helpers -------------------------------------------------------
+
+export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic }) {
+  const stmt = db.prepare(`
+    INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(college_id, slug) DO UPDATE SET
+      title=excluded.title, url=excluded.url, difficulty=excluded.difficulty, topic=excluded.topic
+    RETURNING id`);
+  return stmt.get(college_id, title, slug, url, difficulty, topic ?? null).id;
+}
+
+export const listPracticeProblems = async (collegeId) =>
+  db.prepare('SELECT * FROM practice_problems WHERE college_id=? ORDER BY topic, created_at DESC')
+    .all(collegeId);
+
+// Distinct topics used by a college (for the add-problem topic picker).
+export const listTopics = async (collegeId) =>
+  db.prepare(
+    "SELECT DISTINCT topic FROM practice_problems WHERE college_id=? AND topic IS NOT NULL AND topic<>'' ORDER BY topic"
+  ).all(collegeId).map((r) => r.topic);
+
+export const getPracticeProblemsByCollege = async (collegeId) =>
+  db.prepare('SELECT * FROM practice_problems WHERE college_id=?').all(collegeId);
+
+export const getProblemBySlug = async (collegeId, slug) =>
+  db.prepare('SELECT * FROM practice_problems WHERE college_id=? AND slug=?').get(collegeId, slug);
+
+export const deletePracticeProblem = async (id) =>
+  db.prepare('DELETE FROM practice_problems WHERE id=?').run(id);
+
+export async function markCompletion(studentId, problemId, solvedTimestamp) {
+  const r = db.prepare(`
+    INSERT OR IGNORE INTO practice_completions(student_id, problem_id, solved_timestamp)
+    VALUES (?,?,?)`).run(studentId, problemId, solvedTimestamp ?? null);
+  return r.changes > 0; // true if newly inserted
+}
+
+export const getCompletionsForCollege = async (collegeId) =>
+  db.prepare(`
+    SELECT pc.student_id, pc.problem_id, pc.completed_at
+    FROM practice_completions pc
+    JOIN practice_problems pp ON pp.id = pc.problem_id
+    WHERE pp.college_id = ?`).all(collegeId);
+
+export const getCompletionsForStudent = async (studentId) =>
+  db.prepare('SELECT problem_id, completed_at FROM practice_completions WHERE student_id=?')
+    .all(studentId);
