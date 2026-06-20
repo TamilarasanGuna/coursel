@@ -41,12 +41,14 @@ router.get('/admin/status', (req, res) => res.json({ authRequired: !!config.admi
 
 router.post('/admin/login', (req, res) => {
   if (!config.adminPassword) return res.json({ ok: true, authRequired: false, token: '' });
-  if (String(req.body?.password || '') === config.adminPassword) {
+  const username = String(req.body?.username || '').trim();
+  const password = String(req.body?.password || '');
+  if (username === config.adminUsername && password === config.adminPassword) {
     const token = randomUUID();
     adminTokens.add(token);
     return res.json({ ok: true, token });
   }
-  return res.status(401).json({ error: 'Incorrect admin password.' });
+  return res.status(401).json({ error: 'Incorrect admin username or password.' });
 });
 
 // Wrap async handlers so a rejected promise becomes a 500 instead of a hung request.

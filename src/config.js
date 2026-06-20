@@ -36,8 +36,10 @@ export const config = {
   // with no network access. Set LC_MOCK=true to enable.
   mock: process.env.LC_MOCK === 'true',
 
-  // Admin password. When set, the admin dashboard + its APIs require login.
-  // Leave empty to keep the admin side open (a warning is logged at startup).
+  // Admin login. When ADMIN_PASSWORD is set, the admin dashboard + its APIs
+  // require a username + password. Username defaults to "admin".
+  // Leave ADMIN_PASSWORD empty to keep the admin side open (warned at startup).
+  adminUsername: process.env.ADMIN_USERNAME || 'admin',
   adminPassword: process.env.ADMIN_PASSWORD || '',
 
   // Data layer: 'sqlite' (local file, default) or 'supabase' (cloud Postgres).

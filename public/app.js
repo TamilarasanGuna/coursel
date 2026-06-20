@@ -673,25 +673,28 @@ function showAdminLogin() {
   try { localStorage.removeItem('lc_admin_token'); } catch {}
   $('#adminLogin').classList.add('show');
   $('#adminLogout').style.display = 'none';
-  setTimeout(() => $('#adminPass').focus(), 50);
+  setTimeout(() => $('#adminUser').focus(), 50);
 }
 async function adminLogin() {
+  const username = $('#adminUser').value.trim();
   const password = $('#adminPass').value;
-  if (!password) return setMsg('#adminLoginMsg', 'Enter the password.', 'err');
+  if (!username || !password) return setMsg('#adminLoginMsg', 'Enter your username and password.', 'err');
   try {
     const res = await fetch('/api/admin/login', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }),
     });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d.error || 'Login failed');
     if (d.token) { try { localStorage.setItem('lc_admin_token', d.token); } catch {} }
     $('#adminLogin').classList.remove('show');
     $('#adminPass').value = '';
+    $('#adminUser').value = '';
     $('#adminLogout').style.display = 'inline-block';
     loadColleges();
   } catch (e) { setMsg('#adminLoginMsg', e.message, 'err'); }
 }
 $('#adminLoginBtn').addEventListener('click', adminLogin);
+$('#adminUser').addEventListener('keydown', (e) => { if (e.key === 'Enter') adminLogin(); });
 $('#adminPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') adminLogin(); });
 $('#adminLogout').addEventListener('click', () => { showAdminLogin(); });
 
