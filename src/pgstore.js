@@ -349,22 +349,23 @@ export async function getMonthlySolvedGrowth(studentId) {
 
 // ---- Practice helpers -------------------------------------------------------
 
-export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic }) {
+export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic, domain }) {
   const { rows } = await q(
-    `INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic)
-     VALUES ($1,$2,$3,$4,$5,$6)
+    `INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic, domain)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)
      ON CONFLICT (college_id, slug) DO UPDATE SET
-       title=EXCLUDED.title, url=EXCLUDED.url, difficulty=EXCLUDED.difficulty, topic=EXCLUDED.topic
+       title=EXCLUDED.title, url=EXCLUDED.url, difficulty=EXCLUDED.difficulty,
+       topic=EXCLUDED.topic, domain=EXCLUDED.domain
      RETURNING id`,
-    [college_id, title, slug, url, difficulty, topic ?? null]
+    [college_id, title, slug, url, difficulty, topic ?? null, domain ?? null]
   );
   return rows[0].id;
 }
 
 export async function listPracticeProblems(collegeId) {
   const { rows } = await q(
-    `SELECT id, college_id, title, slug, url, difficulty, topic, ${TS('created_at', 'created_at')}
-     FROM practice_problems WHERE college_id=$1 ORDER BY topic NULLS FIRST, created_at DESC`,
+    `SELECT id, college_id, title, slug, url, difficulty, topic, domain, ${TS('created_at', 'created_at')}
+     FROM practice_problems WHERE college_id=$1 ORDER BY domain NULLS FIRST, topic NULLS FIRST, created_at DESC`,
     [collegeId]
   );
   return rows;
@@ -378,6 +379,14 @@ export async function listTopics(collegeId) {
   return rows.map((r) => r.topic);
 }
 
+export async function listDomains(collegeId) {
+  const { rows } = await q(
+    "SELECT DISTINCT domain FROM practice_problems WHERE college_id=$1 AND domain IS NOT NULL AND domain<>'' ORDER BY domain",
+    [collegeId]
+  );
+  return rows.map((r) => r.domain);
+}
+
 export async function getPracticeProblemsByCollege(collegeId) {
   const { rows } = await q('SELECT * FROM practice_problems WHERE college_id=$1', [collegeId]);
   return rows;
@@ -389,6 +398,11 @@ export async function getProblemBySlug(collegeId, slug) {
     [collegeId, slug]
   );
   return rows[0];
+}
+
+export async function countPracticeProblems(collegeId) {
+  const { rows } = await q('SELECT COUNT(*)::int AS c FROM practice_problems WHERE college_id=$1', [collegeId]);
+  return rows[0].c;
 }
 
 export async function deletePracticeProblem(id) {
@@ -413,6 +427,28 @@ export async function getCompletionsForCollege(collegeId) {
     [collegeId]
   );
   return rows;
+}
+
+export async function getCompletedCountsForStudents(studentIds) {
+  if (!studentIds || !studentIds.length) return {};
+  const { rows } = await q(
+    'SELECT student_id, COUNT(*)::int AS c FROM practice_completions WHERE student_id = ANY($1) GROUP BY student_id',
+    [studentIds]
+  );
+  const m = {};
+  for (const r of rows) m[r.student_id] = r.c;
+  return m;
+}
+export async function getCompletedCountsByProblem(collegeId) {
+  const { rows } = await q(
+    `SELECT pc.problem_id AS pid, COUNT(*)::int AS c
+     FROM practice_completions pc JOIN practice_problems pp ON pp.id = pc.problem_id
+     WHERE pp.college_id = $1 GROUP BY pc.problem_id`,
+    [collegeId]
+  );
+  const m = {};
+  for (const r of rows) m[r.pid] = r.c;
+  return m;
 }
 
 export async function getCompletionsForStudent(studentId) {

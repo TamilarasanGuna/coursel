@@ -66,6 +66,16 @@ db.exec(`
   );
 `);
 
+// Indexes for the hot paths (foreign keys used in joins/aggregates).
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_students_college ON students(college_id);
+  CREATE INDEX IF NOT EXISTS idx_problems_college ON practice_problems(college_id);
+  CREATE INDEX IF NOT EXISTS idx_snap_student ON stat_snapshots(student_id);
+  CREATE INDEX IF NOT EXISTS idx_ma_student ON monthly_activity(student_id);
+  CREATE INDEX IF NOT EXISTS idx_pc_student ON practice_completions(student_id);
+  CREATE INDEX IF NOT EXISTS idx_pc_problem ON practice_completions(problem_id);
+`);
+
 // ---- Migrations -------------------------------------------------------------
 
 // Add colleges.access_code if it doesn't exist yet (student-login gate).
@@ -79,6 +89,9 @@ if (!collegeCols.some((c) => c.name === 'view_token')) {
 const problemCols = db.prepare('PRAGMA table_info(practice_problems)').all();
 if (!problemCols.some((c) => c.name === 'topic')) {
   db.exec('ALTER TABLE practice_problems ADD COLUMN topic TEXT');
+}
+if (!problemCols.some((c) => c.name === 'domain')) {
+  db.exec('ALTER TABLE practice_problems ADD COLUMN domain TEXT');
 }
 // Baseline = the stats captured on a student's FIRST successful sync, so we can
 // show progress (current minus baseline) on every sync afterwards.
@@ -353,31 +366,40 @@ export async function getMonthlySolvedGrowth(studentId) {
 
 // ---- Practice helpers -------------------------------------------------------
 
-export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic }) {
+export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic, domain }) {
   const stmt = db.prepare(`
-    INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic, domain)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(college_id, slug) DO UPDATE SET
-      title=excluded.title, url=excluded.url, difficulty=excluded.difficulty, topic=excluded.topic
+      title=excluded.title, url=excluded.url, difficulty=excluded.difficulty,
+      topic=excluded.topic, domain=excluded.domain
     RETURNING id`);
-  return stmt.get(college_id, title, slug, url, difficulty, topic ?? null).id;
+  return stmt.get(college_id, title, slug, url, difficulty, topic ?? null, domain ?? null).id;
 }
 
 export const listPracticeProblems = async (collegeId) =>
-  db.prepare('SELECT * FROM practice_problems WHERE college_id=? ORDER BY topic, created_at DESC')
+  db.prepare('SELECT * FROM practice_problems WHERE college_id=? ORDER BY domain, topic, created_at DESC')
     .all(collegeId);
 
-// Distinct topics used by a college (for the add-problem topic picker).
+// Distinct topics / domains used by a college (for the add-problem pickers + tabs).
 export const listTopics = async (collegeId) =>
   db.prepare(
     "SELECT DISTINCT topic FROM practice_problems WHERE college_id=? AND topic IS NOT NULL AND topic<>'' ORDER BY topic"
   ).all(collegeId).map((r) => r.topic);
+
+export const listDomains = async (collegeId) =>
+  db.prepare(
+    "SELECT DISTINCT domain FROM practice_problems WHERE college_id=? AND domain IS NOT NULL AND domain<>'' ORDER BY domain"
+  ).all(collegeId).map((r) => r.domain);
 
 export const getPracticeProblemsByCollege = async (collegeId) =>
   db.prepare('SELECT * FROM practice_problems WHERE college_id=?').all(collegeId);
 
 export const getProblemBySlug = async (collegeId, slug) =>
   db.prepare('SELECT * FROM practice_problems WHERE college_id=? AND slug=?').get(collegeId, slug);
+
+export const countPracticeProblems = async (collegeId) =>
+  db.prepare('SELECT COUNT(*) AS c FROM practice_problems WHERE college_id=?').get(collegeId).c;
 
 export const deletePracticeProblem = async (id) =>
   db.prepare('DELETE FROM practice_problems WHERE id=?').run(id);
@@ -395,6 +417,28 @@ export const getCompletionsForCollege = async (collegeId) =>
     FROM practice_completions pc
     JOIN practice_problems pp ON pp.id = pc.problem_id
     WHERE pp.college_id = ?`).all(collegeId);
+
+// Aggregated completion counts (scale-friendly — no row dumps).
+export async function getCompletedCountsForStudents(studentIds) {
+  if (!studentIds || !studentIds.length) return {};
+  const ph = studentIds.map(() => '?').join(',');
+  const rows = db.prepare(
+    `SELECT student_id, COUNT(*) AS c FROM practice_completions WHERE student_id IN (${ph}) GROUP BY student_id`
+  ).all(...studentIds);
+  const m = {};
+  for (const r of rows) m[r.student_id] = r.c;
+  return m;
+}
+export async function getCompletedCountsByProblem(collegeId) {
+  const rows = db.prepare(
+    `SELECT pc.problem_id AS pid, COUNT(*) AS c
+     FROM practice_completions pc JOIN practice_problems pp ON pp.id = pc.problem_id
+     WHERE pp.college_id = ? GROUP BY pc.problem_id`
+  ).all(collegeId);
+  const m = {};
+  for (const r of rows) m[r.pid] = r.c;
+  return m;
+}
 
 export const getCompletionsForStudent = async (studentId) =>
   db.prepare('SELECT problem_id, completed_at FROM practice_completions WHERE student_id=?')

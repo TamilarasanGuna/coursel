@@ -21,6 +21,7 @@ function isPublicReq(req) {
   const p = req.path, m = req.method;
   if (m === 'OPTIONS') return true;
   if (p === '/admin/login' || p === '/admin/status') return true;
+  if (m === 'GET' && (p === '/template' || p === '/practice-template')) return true; // blank downloads, no data
   if (m === 'GET' && p === '/colleges') return true;                       // student login dropdown
   if (m === 'GET' && /^\/colleges\/\d+\/options$/.test(p)) return true;    // student register dropdowns
   if (m === 'POST' && (p === '/student/login' || p === '/student/register')) return true;
@@ -135,25 +136,18 @@ router.get('/view/:token', h(async (req, res) => {
     pageSize: Math.min(500, Math.max(1, Number(req.query.pageSize) || 100)),
   };
 
+  const light = req.query.light === '1';
   const problems = await store.listPracticeProblems(c.id);
   const { rows, total, offset } = await store.getStudentsPage(c.id, f);
-  const completions = await store.getCompletionsForCollege(c.id);
-
-  const compByStudent = new Map();
-  const compByProblem = new Map();
-  for (const x of completions) {
-    if (!compByStudent.has(x.student_id)) compByStudent.set(x.student_id, new Set());
-    compByStudent.get(x.student_id).add(x.problem_id);
-    compByProblem.set(x.problem_id, (compByProblem.get(x.problem_id) || 0) + 1);
-  }
-
+  const studentCounts = await store.getCompletedCountsForStudents(rows.map((s) => s.id));
+  const problemCounts = await store.getCompletedCountsByProblem(c.id);
   const collegeStudentCount = (await store.getCollegeTotals(c.id, {})).students;
 
   res.json({
     college: { name: c.name },
     totals: await store.getCollegeTotals(c.id, f),
-    monthly: await store.getCollegeMonthly(c.id, f),
-    filters: await store.getFilterOptions(c.id),
+    monthly: light ? [] : await store.getCollegeMonthly(c.id, f),
+    filters: light ? null : await store.getFilterOptions(c.id),
     page: f.page,
     pageSize: f.pageSize,
     total,
@@ -161,7 +155,7 @@ router.get('/view/:token', h(async (req, res) => {
     students: rows.map((s, i) => ({
       ...omitEmail(s),
       classRank: offset + i + 1,
-      practiceCompleted: compByStudent.get(s.id)?.size || 0,
+      practiceCompleted: studentCounts[s.id] || 0,
       practiceTotal: problems.length,
     })),
     studentCount: collegeStudentCount,
@@ -170,7 +164,8 @@ router.get('/view/:token', h(async (req, res) => {
       url: p.url,
       difficulty: p.difficulty,
       topic: p.topic || null,
-      completedCount: compByProblem.get(p.id) || 0,
+      domain: p.domain || null,
+      completedCount: problemCounts[p.id] || 0,
     })),
   });
 }));
@@ -322,6 +317,7 @@ router.get('/student/:studentId/dashboard', h(async (req, res) => {
       url: p.url,
       difficulty: p.difficulty,
       topic: p.topic || null,
+      domain: p.domain || null,
       completed: compIds.has(p.id),
       completed_at: completions.find((c) => c.problem_id === p.id)?.completed_at || null,
     })),
@@ -388,30 +384,26 @@ router.get('/colleges/:id/dashboard', h(async (req, res) => {
     pageSize: Math.min(500, Math.max(1, Number(req.query.pageSize) || 100)),
   };
 
-  const problems = await store.listPracticeProblems(collegeId);
+  const light = req.query.light === '1'; // auto-refresh: skip the heavy monthly/filter queries
+  const practiceTotal = await store.countPracticeProblems(collegeId);
   const { rows, total, offset } = await store.getStudentsPage(collegeId, f);
 
-  // completion counts (one query for the whole college)
-  const completions = await store.getCompletionsForCollege(collegeId);
-  const compByStudent = new Map();
-  for (const c of completions) {
-    if (!compByStudent.has(c.student_id)) compByStudent.set(c.student_id, new Set());
-    compByStudent.get(c.student_id).add(c.problem_id);
-  }
+  // completion counts only for the visible page (aggregate, not row dumps)
+  const counts = await store.getCompletedCountsForStudents(rows.map((s) => s.id));
 
   const students = rows.map((s, i) => ({
     ...omitEmail(s),
     classRank: offset + i + 1,
-    practiceCompleted: compByStudent.get(s.id)?.size || 0,
-    practiceTotal: problems.length,
+    practiceCompleted: counts[s.id] || 0,
+    practiceTotal,
   }));
 
   res.json({
     students,
-    practiceTotal: problems.length,
-    totals: await store.getCollegeTotals(collegeId, f),     // reflects current filters
-    monthly: await store.getCollegeMonthly(collegeId, f),   // single aggregated query
-    filters: await store.getFilterOptions(collegeId),       // distinct batches/depts/campuses
+    practiceTotal,
+    totals: await store.getCollegeTotals(collegeId, f),
+    monthly: light ? [] : await store.getCollegeMonthly(collegeId, f),
+    filters: light ? null : await store.getFilterOptions(collegeId),
     page: f.page,
     pageSize: f.pageSize,
     total,
@@ -459,24 +451,17 @@ router.post('/students/:id/reset-baseline', h(async (req, res) => {
 router.get('/colleges/:id/practice', h(async (req, res) => {
   const collegeId = Number(req.params.id);
   const problems = await store.listPracticeProblems(collegeId);
-  const students = await store.listStudents(collegeId);
-  const completions = await store.getCompletionsForCollege(collegeId);
-
-  const compByProblem = new Map();
-  for (const c of completions) {
-    if (!compByProblem.has(c.problem_id)) compByProblem.set(c.problem_id, []);
-    compByProblem.get(c.problem_id).push(c.student_id);
-  }
+  const problemCounts = await store.getCompletedCountsByProblem(collegeId); // aggregate
+  const studentCount = (await store.getCollegeTotals(collegeId, {})).students;
 
   res.json({
-    studentCount: students.length,
+    studentCount,
     topics: await store.listTopics(collegeId),
+    domains: await store.listDomains(collegeId),
     problems: problems.map((p) => ({
       ...p,
-      completedCount: compByProblem.get(p.id)?.length || 0,
+      completedCount: problemCounts[p.id] || 0,
     })),
-    students: students.map((s) => ({ id: s.id, name: s.name, username: s.username })),
-    completions,
   });
 }));
 
@@ -486,6 +471,7 @@ router.get('/colleges/:id/practice', h(async (req, res) => {
 router.post('/colleges/:id/practice', upload.single('file'), h(async (req, res) => {
   const collegeId = Number(req.params.id);
   const formTopic = (req.body.topic || '').trim() || null;      // applies to all when set
+  const formDomain = (req.body.domain || '').trim() || null;
   const formDifficulty = (req.body.difficulty || '').trim() || null;
   const items = [];
 
@@ -500,11 +486,12 @@ router.post('/colleges/:id/practice', upload.single('file'), h(async (req, res) 
         title: pick(row, ['title', 'name', 'problem name', 'question']),
         difficulty: pick(row, ['difficulty', 'level']) || formDifficulty, // row value wins
         topic: pick(row, ['topic', 'category', 'tag']) || formTopic,
+        domain: pick(row, ['domain', 'area', 'subject']) || formDomain,
       });
     }
   } else {
     const links = (req.body.links || '').split(/[\n,]+/).map((l) => l.trim()).filter(Boolean);
-    for (const url of links) items.push({ url, topic: formTopic, difficulty: formDifficulty });
+    for (const url of links) items.push({ url, topic: formTopic, domain: formDomain, difficulty: formDifficulty });
   }
 
   if (!items.length) return res.status(400).json({ error: 'No problem links found.' });
@@ -522,6 +509,7 @@ router.post('/colleges/:id/practice', upload.single('file'), h(async (req, res) 
       url,
       difficulty: it.difficulty || null,
       topic: it.topic || null,
+      domain: it.domain || null,
     });
     added.push({ id, slug });
   }
@@ -632,10 +620,10 @@ router.get('/template', (req, res) => {
 router.get('/practice-template', (req, res) => {
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([
-    ['URL', 'Topic', 'Difficulty', 'Title'],
-    ['https://leetcode.com/problems/two-sum/', 'Arrays', 'Easy', 'Two Sum'],
-    ['https://leetcode.com/problems/add-two-numbers/', 'Linked List', 'Medium', ''],
-    ['trapping-rain-water', 'Two Pointers', 'Hard', ''],
+    ['URL', 'Domain', 'Topic', 'Difficulty', 'Title'],
+    ['https://leetcode.com/problems/missing-number/', 'Fundamentals of Programming', 'Array', 'Easy', 'Missing Number'],
+    ['https://leetcode.com/problems/add-two-numbers/', 'Data Structures', 'Linked List', 'Medium', ''],
+    ['trapping-rain-water', 'Algorithms', 'Two Pointers', 'Hard', ''],
   ]);
   XLSX.utils.book_append_sheet(wb, ws, 'Problems');
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });

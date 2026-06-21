@@ -13,6 +13,7 @@ const api = (path, opts = {}) => {
 
 let state = {
   collegeId: null, students: [], monthlyChart: null, practiceCollegeId: null,
+  practiceDomain: '__all', // selected domain tab in the Practice section
   // dashboard pagination + filters
   dash: { batch: '', department: '', campus: '', q: '', page: 1, pageSize: 100, total: 0 },
   filtersFor: null, // college id the filter dropdowns were populated for
@@ -217,14 +218,26 @@ function renderEmptyDashboard() {
   if ($('#pageInfo')) $('#pageInfo').textContent = '';
 }
 
+let dashAbort = null;
 async function loadDashboard(opts = {}) {
   if (!state.collegeId) return renderEmptyDashboard();
   const dq = state.dash;
-  const qs = new URLSearchParams({
+  const params = {
     batch: dq.batch, department: dq.department, campus: dq.campus, q: dq.q,
     page: String(dq.page), pageSize: String(dq.pageSize),
-  });
-  const d = await api(`/colleges/${state.collegeId}/dashboard?${qs}`);
+  };
+  if (opts.chart === false) params.light = '1'; // auto-refresh: skip monthly/filter queries
+  const qs = new URLSearchParams(params);
+  dashAbort?.abort();
+  const ctrl = new AbortController();
+  dashAbort = ctrl;
+  let d;
+  try {
+    d = await api(`/colleges/${state.collegeId}/dashboard?${qs}`, { signal: ctrl.signal });
+  } catch (e) {
+    if (e.name === 'AbortError' || /abort/i.test(e.message || '')) return; // superseded by a newer load
+    throw e;
+  }
   state.students = d.students;
   state.dash.total = d.total;
 
@@ -238,7 +251,7 @@ async function loadDashboard(opts = {}) {
     <div class="card"><div class="v">${d.practiceTotal}</div><div class="l">Practice problems</div></div>`;
 
   if (opts.chart !== false) renderMonthlyChart(d.monthly); // skip on fast auto-refresh to avoid flicker
-  if (state.filtersFor !== state.collegeId) { populateFilters(d.filters); state.filtersFor = state.collegeId; }
+  if (state.filtersFor !== state.collegeId && d.filters) { populateFilters(d.filters); state.filtersFor = state.collegeId; }
   renderStudents(d.students);
   renderPager();
 }
@@ -466,28 +479,39 @@ $('#practiceCollege').addEventListener('change', (e) => {
   loadPractice();
 });
 
+const domName = (p) => (p.domain && p.domain.trim()) || 'Uncategorized';
+const topName = (p) => (p.topic && p.topic.trim()) || 'Uncategorized';
+const sortGroups = (a, b) => (a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b));
+
 async function loadPractice() {
   const cid = practiceCid();
   if (!cid) return;
   const d = await api(`/colleges/${cid}/practice`);
 
-  // topic picker options
+  // picker options
   $('#topicList').innerHTML = (d.topics || []).map((t) => `<option value="${esc(t)}">`).join('');
+  $('#domainList').innerHTML = (d.domains || []).map((t) => `<option value="${esc(t)}">`).join('');
 
   const tbody = $('#practiceTable').querySelector('tbody');
   if (!d.problems.length) {
+    $('#domainTabs').innerHTML = '';
     tbody.innerHTML = '<tr><td colspan="5" class="empty">No practice problems assigned yet.</td></tr>';
     return;
   }
 
-  // group problems by topic
-  const groups = {};
-  for (const p of d.problems) {
-    const t = (p.topic && p.topic.trim()) || 'Uncategorized';
-    (groups[t] ||= []).push(p);
+  // domain tabs: All + each domain present
+  const domainSet = [...new Set(d.problems.map(domName))].sort(sortGroups);
+  if (state.practiceDomain && state.practiceDomain !== '__all' && !domainSet.includes(state.practiceDomain)) {
+    state.practiceDomain = '__all';
   }
-  const topicNames = Object.keys(groups).sort((a, b) =>
-    a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b));
+  const sel = state.practiceDomain || '__all';
+  $('#domainTabs').innerHTML =
+    `<button class="dom-tab ${sel === '__all' ? 'active' : ''}" data-dom="__all">All domains</button>` +
+    domainSet.map((dn) => `<button class="dom-tab ${sel === dn ? 'active' : ''}" data-dom="${esc(dn)}">${esc(dn)}</button>`).join('');
+  $('#domainTabs').querySelectorAll('.dom-tab').forEach((b) => b.addEventListener('click', () => {
+    state.practiceDomain = b.dataset.dom;
+    loadPractice();
+  }));
 
   const rowHtml = (p) => {
     const pct = d.studentCount ? Math.round((p.completedCount / d.studentCount) * 100) : 0;
@@ -499,11 +523,27 @@ async function loadPractice() {
       <td><button class="btn btn-sm btn-danger del-prob" data-id="${p.id}">Delete</button></td>
     </tr>`;
   };
+  // topic sub-group within a set of problems
+  const byTopic = (probs) => {
+    const groups = {};
+    for (const p of probs) (groups[topName(p)] ||= []).push(p);
+    return Object.keys(groups).sort(sortGroups).map((t) =>
+      `<tr><td colspan="5" style="background:var(--panel-2);font-weight:600;padding-left:18px">${esc(t)} <span style="color:var(--muted);font-weight:400">· ${groups[t].length}</span></td></tr>`
+      + groups[t].map(rowHtml).join('')).join('');
+  };
 
-  tbody.innerHTML = topicNames.map((t) =>
-    `<tr><td colspan="5" style="background:var(--panel-2);font-weight:600">${esc(t)} <span style="color:var(--muted);font-weight:400">· ${groups[t].length}</span></td></tr>`
-    + groups[t].map(rowHtml).join('')
-  ).join('');
+  let html = '';
+  if (sel === '__all') {
+    // group by domain (header), then topic
+    const domGroups = {};
+    for (const p of d.problems) (domGroups[domName(p)] ||= []).push(p);
+    html = domainSet.map((dn) =>
+      `<tr><td colspan="5" style="background:var(--accent);color:#1a1300;font-weight:700">${esc(dn)} <span style="font-weight:400">· ${domGroups[dn].length}</span></td></tr>`
+      + byTopic(domGroups[dn])).join('');
+  } else {
+    html = byTopic(d.problems.filter((p) => domName(p) === sel));
+  }
+  tbody.innerHTML = html;
 
   tbody.querySelectorAll('.del-prob').forEach((b) => b.addEventListener('click', async () => {
     if (!confirm('Remove this practice problem?')) return;
@@ -515,6 +555,7 @@ async function loadPractice() {
 // Add a single question (own link + topic + difficulty).
 $('#addSingleBtn').addEventListener('click', async () => {
   const link = $('#singleLink').value.trim();
+  const domain = $('#singleDomain').value.trim();
   const topic = $('#singleTopic').value.trim();
   const difficulty = $('#singleDifficulty').value;
   if (!practiceCid()) return setMsg('#singleMsg', 'Pick a college first.', 'err');
@@ -522,7 +563,7 @@ $('#addSingleBtn').addEventListener('click', async () => {
   try {
     const r = await api(`/colleges/${practiceCid()}/practice`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ links: link, topic, difficulty }),
+      body: JSON.stringify({ links: link, topic, domain, difficulty }),
     });
     if (r.added) {
       setMsg('#singleMsg', `Added.`, 'ok');
@@ -536,13 +577,14 @@ $('#addSingleBtn').addEventListener('click', async () => {
 
 $('#addPracticeBtn').addEventListener('click', async () => {
   const links = $('#practiceLinks').value.trim();
+  const domain = $('#practiceDomain').value.trim();
   const topic = $('#practiceTopic').value.trim();
   const difficulty = $('#practiceDifficulty').value;
   if (!practiceCid()) return setMsg('#practiceMsg', 'Pick a college first.', 'err');
   if (!links) return setMsg('#practiceMsg', 'Paste at least one link.', 'err');
   try {
     const r = await api(`/colleges/${practiceCid()}/practice`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ links, topic, difficulty }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ links, topic, domain, difficulty }),
     });
     setMsg('#practiceMsg', `Added ${r.added} problem(s)${topic ? ' under “' + topic + '”' : ''}.` + (r.skipped.length ? ` Skipped ${r.skipped.length}.` : ''), 'ok');
     $('#practiceLinks').value = '';
@@ -556,9 +598,11 @@ $('#practiceFile').addEventListener('change', async (e) => {
   const fd = new FormData();
   fd.append('file', file);
   const topic = $('#practiceTopic').value.trim();
+  const domain = $('#practiceDomain').value.trim();
   const difficulty = $('#practiceDifficulty').value;
-  if (topic) fd.append('topic', topic); // fallback topic for rows without a Topic column
-  if (difficulty) fd.append('difficulty', difficulty); // fallback difficulty for such rows
+  if (topic) fd.append('topic', topic); // fallbacks for rows missing these columns
+  if (domain) fd.append('domain', domain);
+  if (difficulty) fd.append('difficulty', difficulty);
   try {
     const r = await api(`/colleges/${practiceCid()}/practice`, { method: 'POST', body: fd });
     setMsg('#practiceMsg', `Added ${r.added} problem(s) from file.`, 'ok');

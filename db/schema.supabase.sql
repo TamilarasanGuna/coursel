@@ -74,11 +74,13 @@ create table if not exists practice_problems (
   url         text not null,
   difficulty  text,
   topic       text,
+  domain      text,
   created_at  timestamptz not null default now(),
   unique (college_id, slug)
 );
--- For projects created before the topic column existed:
+-- For projects created before these columns existed:
 alter table practice_problems add column if not exists topic text;
+alter table practice_problems add column if not exists domain text;
 
 create table if not exists practice_completions (
   student_id       bigint not null references students(id) on delete cascade,
@@ -91,3 +93,6 @@ create table if not exists practice_completions (
 create index if not exists idx_students_college on students(college_id);
 create index if not exists idx_problems_college on practice_problems(college_id);
 create index if not exists idx_snapshots_student on stat_snapshots(student_id);
+create index if not exists idx_ma_student on monthly_activity(student_id);
+create index if not exists idx_pc_student on practice_completions(student_id);
+create index if not exists idx_pc_problem on practice_completions(problem_id);

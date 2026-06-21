@@ -9,6 +9,8 @@ const api = (path, opts) => fetch('/api' + path, opts).then(async (r) => {
 let session = { collegeId: null, code: null, studentId: null, collegeName: '', name: '' };
 let myChart = null;
 let dashAnimated = false; // entrance + count-up run once per session, not on each refresh
+let studentDomain = '__all'; // selected domain tab in the practice list
+let lastPractice = []; // cached practice list so domain tab clicks can re-render
 
 function lcChartColors() {
   const cs = getComputedStyle(document.documentElement);
@@ -340,21 +342,20 @@ function renderProgress(me, growth) {
 }
 
 function renderPractice(p) {
+  lastPractice = p;
   const done = p.filter((x) => x.completed).length;
   $('#practiceSummary').textContent = p.length ? `${done} / ${p.length} solved` : '';
   const cont = $('#myPracticeList');
+  const tabsEl = $('#myDomainTabs');
   if (!p.length) {
+    tabsEl.innerHTML = '';
     cont.innerHTML = '<p class="empty">No practice problems assigned yet.</p>';
     return;
   }
 
-  const groups = {};
-  for (const x of p) {
-    const t = (x.topic && x.topic.trim()) || 'Uncategorized';
-    (groups[t] ||= []).push(x);
-  }
-  const names = Object.keys(groups).sort((a, b) =>
-    a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b));
+  const dom = (x) => (x.domain && x.domain.trim()) || 'Uncategorized';
+  const top = (x) => (x.topic && x.topic.trim()) || 'Uncategorized';
+  const sortG = (a, b) => (a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b));
 
   const item = (x) => `<div class="stu-prac">
     <div class="stu-badge ${x.completed ? 'done' : 'todo'}">${x.completed ? '✓' : '•'}</div>
@@ -363,16 +364,50 @@ function renderPractice(p) {
     <a class="btn btn-sm ${x.completed ? 'btn-ghost' : 'btn-primary'}" href="${esc(x.url)}" target="_blank" rel="noopener">${x.completed ? 'Review' : 'Solve →'}</a>
   </div>`;
 
-  cont.innerHTML = names.map((t) => {
-    const g = groups[t];
-    const solved = g.filter((x) => x.completed).length;
-    const pct = Math.round((solved / g.length) * 100);
-    return `<div class="stu-topic-head">
-        <span class="name">${esc(t)}</span>
-        <span class="stu-topic-bar"><span style="width:${pct}%"></span></span>
-        <span class="hint" style="white-space:nowrap">${solved}/${g.length}</span>
-      </div>${g.map(item).join('')}`;
-  }).join('');
+  const topicBlocks = (probs) => {
+    const groups = {};
+    for (const x of probs) (groups[top(x)] ||= []).push(x);
+    return Object.keys(groups).sort(sortG).map((t) => {
+      const g = groups[t];
+      const solved = g.filter((x) => x.completed).length;
+      const pct = Math.round((solved / g.length) * 100);
+      return `<div class="stu-topic-head">
+          <span class="name">${esc(t)}</span>
+          <span class="stu-topic-bar"><span style="width:${pct}%"></span></span>
+          <span class="hint" style="white-space:nowrap">${solved}/${g.length}</span>
+        </div>${g.map(item).join('')}`;
+    }).join('');
+  };
+
+  const domGroups = {};
+  for (const x of p) (domGroups[dom(x)] ||= []).push(x);
+  const domNames = Object.keys(domGroups).sort(sortG);
+
+  // No domains assigned -> just topics, no tabs.
+  if (domNames.length === 1 && domNames[0] === 'Uncategorized') {
+    tabsEl.innerHTML = '';
+    cont.innerHTML = topicBlocks(p);
+    return;
+  }
+
+  // Domain tabs (All + one per domain).
+  if (studentDomain !== '__all' && !domNames.includes(studentDomain)) studentDomain = '__all';
+  const sel = studentDomain;
+  tabsEl.innerHTML =
+    `<button class="dom-tab ${sel === '__all' ? 'active' : ''}" data-dom="__all">All</button>` +
+    domNames.map((dn) => `<button class="dom-tab ${sel === dn ? 'active' : ''}" data-dom="${esc(dn)}">${esc(dn)}</button>`).join('');
+  tabsEl.querySelectorAll('.dom-tab').forEach((b) => b.addEventListener('click', () => {
+    studentDomain = b.dataset.dom;
+    renderPractice(lastPractice);
+  }));
+
+  cont.innerHTML = sel === '__all'
+    ? domNames.map((dn) => {
+        const g = domGroups[dn];
+        const solved = g.filter((x) => x.completed).length;
+        return `<div class="stu-domain-head">${esc(dn)} <span class="hint">· ${solved}/${g.length} solved</span></div>${topicBlocks(g)}`;
+      }).join('')
+    : topicBlocks(domGroups[sel]);
 }
 
 // ---- helpers ----------------------------------------------------------------

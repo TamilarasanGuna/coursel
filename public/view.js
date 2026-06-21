@@ -55,10 +55,12 @@ function rankDelta(s) {
 async function load(opts = {}) {
   let d;
   try {
-    const qs = new URLSearchParams({
+    const params = {
       batch: dash.batch, department: dash.department, campus: dash.campus, q: dash.q,
       page: String(dash.page), pageSize: String(dash.pageSize),
-    });
+    };
+    if (opts.chart === false) params.light = '1'; // auto-refresh: skip monthly/filter queries
+    const qs = new URLSearchParams(params);
     d = await api(`/view/${encodeURIComponent(token)}?${qs}`);
   } catch (e) {
     $('#content').style.display = 'none';
@@ -99,7 +101,7 @@ function render(d, opts) {
     lastMonthlySig = sig;
   }
 
-  if (!filtersLoaded) { populateFilters(d.filters); filtersLoaded = true; }
+  if (!filtersLoaded && d.filters) { populateFilters(d.filters); filtersLoaded = true; }
   renderStudents(d.students);
   renderPager();
   renderPractice(d);
@@ -186,9 +188,9 @@ function renderPractice(d) {
     tbody.innerHTML = '<tr><td colspan="4" class="empty">No practice problems assigned.</td></tr>';
     return;
   }
-  const groups = {};
-  for (const p of d.practice) { const t = (p.topic && p.topic.trim()) || 'Uncategorized'; (groups[t] ||= []).push(p); }
-  const names = Object.keys(groups).sort((a, b) => a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b));
+  const dom = (p) => (p.domain && p.domain.trim()) || 'Uncategorized';
+  const top = (p) => (p.topic && p.topic.trim()) || 'Uncategorized';
+  const sortG = (a, b) => (a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b));
   const row = (p) => {
     const pct = d.studentCount ? Math.round((p.completedCount / d.studentCount) * 100) : 0;
     return `<tr>
@@ -197,10 +199,22 @@ function renderPractice(d) {
       <td>${p.completedCount}/${d.studentCount}</td>
       <td><span class="progress"><span style="width:${pct}%"></span></span> ${pct}%</td></tr>`;
   };
-  tbody.innerHTML = names.map((t) =>
-    `<tr><td colspan="4" style="background:var(--panel-2);font-weight:600">${esc(t)} <span style="color:var(--muted);font-weight:400">· ${groups[t].length}</span></td></tr>`
-    + groups[t].map(row).join('')
-  ).join('');
+  const topicRows = (probs) => {
+    const groups = {};
+    for (const p of probs) (groups[top(p)] ||= []).push(p);
+    return Object.keys(groups).sort(sortG).map((t) =>
+      `<tr><td colspan="4" style="background:var(--panel-2);font-weight:600;padding-left:18px">${esc(t)} <span style="color:var(--muted);font-weight:400">· ${groups[t].length}</span></td></tr>`
+      + groups[t].map(row).join('')).join('');
+  };
+  const domGroups = {};
+  for (const p of d.practice) (domGroups[dom(p)] ||= []).push(p);
+  const domNames = Object.keys(domGroups).sort(sortG);
+  const noDomains = domNames.length === 1 && domNames[0] === 'Uncategorized';
+  tbody.innerHTML = noDomains
+    ? topicRows(d.practice)
+    : domNames.map((dn) =>
+        `<tr><td colspan="4" style="background:var(--accent);color:#1a1300;font-weight:700">${esc(dn)} <span style="font-weight:400">· ${domGroups[dn].length}</span></td></tr>`
+        + topicRows(domGroups[dn])).join('');
 }
 
 // ---- read-only student drawer ----------------------------------------------
