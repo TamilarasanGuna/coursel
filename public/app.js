@@ -740,7 +740,10 @@ async function adminLogin() {
 $('#adminLoginBtn').addEventListener('click', adminLogin);
 $('#adminUser').addEventListener('keydown', (e) => { if (e.key === 'Enter') adminLogin(); });
 $('#adminPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') adminLogin(); });
-$('#adminLogout').addEventListener('click', () => { showAdminLogin(); });
+$('#adminLogout').addEventListener('click', async () => {
+  try { await fetch('/api/admin/logout', { method: 'POST', headers: { 'x-admin-token': adminToken() } }); } catch {}
+  showAdminLogin();
+});
 
 (async function boot() {
   let authRequired = false;

@@ -1,4 +1,5 @@
 import express from 'express';
+import helmet from 'helmet';
 import { config } from './config.js';
 import { router } from './routes.js';
 import { startScheduler } from './scheduler.js';
@@ -13,6 +14,27 @@ try {
 }
 
 const app = express();
+app.set('trust proxy', 1); // behind a hosting proxy (Render/Railway) — correct client IPs for rate limiting
+
+// Security headers. CSP allows our inline scripts/styles + the Chart.js CDN, and
+// blocks framing (anti-clickjacking).
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", 'https://cdn.jsdelivr.net'],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      frameAncestors: ["'none'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+    },
+  },
+  crossOriginResourcePolicy: { policy: 'cross-origin' }, // let the Chrome extension fetch the API
+  crossOriginEmbedderPolicy: false,
+}));
+
 app.use(express.json({ limit: '8mb' })); // ingest payloads can be large
 app.use(express.urlencoded({ extended: true }));
 

@@ -2,6 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import XLSX from 'xlsx';
 import { randomUUID } from 'node:crypto';
+import rateLimit from 'express-rate-limit';
 import { config } from './config.js';
 import { store } from './store.js';
 import { parseUsername, parseProblemSlug, fetchProfileStats } from './leetcode.js';
@@ -11,16 +12,28 @@ import { ingestResults } from './ingest.js';
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 export const router = express.Router();
 
+// Throttle auth endpoints to slow brute-forcing.
+const adminLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many login attempts. Try again in a few minutes.' } });
+const studentAuthLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many attempts. Please wait a moment and retry.' } });
+
 // ---- Admin authentication ---------------------------------------------------
 // Single shared password (config.adminPassword). Login returns a token kept in
 // memory; admin requests must send it as the x-admin-token header.
-const adminTokens = new Set();
+const adminTokens = new Map(); // token -> expiry (ms epoch)
+const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // sessions expire after 12 hours
+function tokenValid(token) {
+  if (!token) return false;
+  const exp = adminTokens.get(token);
+  if (!exp) return false;
+  if (Date.now() > exp) { adminTokens.delete(token); return false; }
+  return true;
+}
 
 // Endpoints that stay open regardless of admin auth (student + shared-link + auth itself).
 function isPublicReq(req) {
   const p = req.path, m = req.method;
   if (m === 'OPTIONS') return true;
-  if (p === '/admin/login' || p === '/admin/status') return true;
+  if (p === '/admin/login' || p === '/admin/status' || p === '/admin/logout') return true;
   if (m === 'GET' && (p === '/template' || p === '/practice-template')) return true; // blank downloads, no data
   if (m === 'GET' && p === '/colleges') return true;                       // student login dropdown
   if (m === 'GET' && /^\/colleges\/\d+\/options$/.test(p)) return true;    // student register dropdowns
@@ -33,30 +46,36 @@ function isPublicReq(req) {
 router.use((req, res, next) => {
   if (!config.adminPassword) return next(); // auth disabled
   if (isPublicReq(req)) return next();
-  const token = req.get('x-admin-token');
-  if (token && adminTokens.has(token)) return next();
+  if (tokenValid(req.get('x-admin-token'))) return next();
   return res.status(401).json({ error: 'Admin login required.' });
 });
 
 router.get('/admin/status', (req, res) => res.json({ authRequired: !!config.adminPassword }));
 
-router.post('/admin/login', (req, res) => {
+router.post('/admin/login', adminLoginLimiter, (req, res) => {
   if (!config.adminPassword) return res.json({ ok: true, authRequired: false, token: '' });
   const username = String(req.body?.username || '').trim();
   const password = String(req.body?.password || '');
   if (username === config.adminUsername && password === config.adminPassword) {
     const token = randomUUID();
-    adminTokens.add(token);
+    adminTokens.set(token, Date.now() + TOKEN_TTL_MS);
     return res.json({ ok: true, token });
   }
   return res.status(401).json({ error: 'Incorrect admin username or password.' });
 });
 
+router.post('/admin/logout', (req, res) => {
+  const t = req.get('x-admin-token');
+  if (t) adminTokens.delete(t); // invalidate server-side
+  res.json({ ok: true });
+});
+
 // Wrap async handlers so a rejected promise becomes a 500 instead of a hung request.
+// The detailed error is logged server-side; the client gets a generic message.
 const h = (fn) => (req, res) =>
   Promise.resolve(fn(req, res)).catch((e) => {
-    console.error('[route]', e);
-    if (!res.headersSent) res.status(500).json({ error: e.message });
+    console.error('[route]', req.method, req.path, '-', e);
+    if (!res.headersSent) res.status(500).json({ error: 'Internal server error.' });
   });
 
 const titleize = (slug) =>
@@ -203,7 +222,7 @@ router.get('/colleges/:id/options', h(async (req, res) => {
 // ---- Student side (gated by college access code) ----------------------------
 
 // Student logs in with college + access code + their registered email.
-router.post('/student/login', h(async (req, res) => {
+router.post('/student/login', studentAuthLimiter, h(async (req, res) => {
   const collegeId = Number(req.body?.collegeId);
   const code = req.body?.code;
   const email = (req.body?.email || '').trim();
@@ -226,7 +245,7 @@ router.post('/student/login', h(async (req, res) => {
 
 // Self-register: if a student isn't on the roster, they add themselves
 // (gated by the same college access code). Deduplicated by LeetCode username.
-router.post('/student/register', h(async (req, res) => {
+router.post('/student/register', studentAuthLimiter, h(async (req, res) => {
   const collegeId = Number(req.body?.collegeId);
   const college = await store.getCollege(collegeId);
   if (!college) return res.status(404).json({ error: 'College not found.' });
