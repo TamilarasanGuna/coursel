@@ -66,6 +66,7 @@
       <div class="panel">
         <h2>Monthly submission activity <span class="hint">(whole college)</span></h2>
         <canvas id="monthlyChart" height="90"></canvas>
+        <div id="monthlyStatus" class="hint" style="text-align:center;padding:6px"></div>
       </div>
       <div class="panel">
         <div class="panel-head" style="flex-wrap:wrap;gap:8px">
@@ -99,7 +100,10 @@
     <!-- PRACTICE -->
     <section id="tab-practice" class="tab-panel">
       <div class="panel">
-        <h2>Assign practice problems</h2>
+        <div class="panel-head" style="flex-wrap:wrap;gap:8px">
+          <h2>Assign practice problems</h2>
+          <button id="videoToggle" class="btn btn-sm btn-ghost" title="Show or hide all video links in the student view for this college">🎬 Videos: …</button>
+        </div>
         <datalist id="topicList"></datalist>
         <datalist id="domainList"></datalist>
 
@@ -118,12 +122,13 @@
             <option value="">Difficulty…</option>
             <option>Easy</option><option>Medium</option><option>Hard</option>
           </select>
+          <input id="singleVideo" class="search" autocomplete="off" placeholder="YouTube link (optional)" style="flex:1;min-width:150px" />
           <button id="addSingleBtn" class="btn btn-primary">Add question</button>
           <span id="singleMsg" class="msg" style="margin:0"></span>
         </div>
 
         <h2 style="font-size:13px;margin:22px 0 8px">Add many at once</h2>
-        <p class="hint">Pick or type a <b>topic</b> and a <b>difficulty</b>, then paste LeetCode links (one per line) — all added under that topic and difficulty. Or upload an Excel file with <code>URL</code> (and optionally <code>Topic</code>, <code>Difficulty</code>) columns, which override these.</p>
+        <p class="hint">Pick or type a <b>topic</b> and a <b>difficulty</b>, then paste LeetCode links (one per line). Optionally paste a YouTube link on the matching line of the <b>Video links</b> box — line 1 ↔ line 1, line 2 ↔ line 2, and so on. Or upload an Excel file with <code>URL</code> (and optionally <code>Topic</code>, <code>Difficulty</code>, <code>Video</code>) columns, which override these.</p>
         <div class="row" style="margin-top:0">
           <input id="practiceDomain" class="search" autocomplete="off" placeholder="Domain" style="flex:1;min-width:140px" />
           <input id="practiceTopic" class="search" autocomplete="off" placeholder="Topic (e.g. Array)" style="flex:1;min-width:140px" />
@@ -132,7 +137,16 @@
             <option>Easy</option><option>Medium</option><option>Hard</option>
           </select>
         </div>
-        <textarea id="practiceLinks" rows="4" style="margin-top:12px" placeholder="https://leetcode.com/problems/two-sum/&#10;https://leetcode.com/problems/valid-parentheses/"></textarea>
+        <div class="bulk-cols">
+          <div>
+            <label class="bulk-label">Question links (one per line)</label>
+            <textarea id="practiceLinks" rows="6" placeholder="https://leetcode.com/problems/two-sum/&#10;https://leetcode.com/problems/valid-parentheses/"></textarea>
+          </div>
+          <div>
+            <label class="bulk-label">Video links (optional · same order)</label>
+            <textarea id="practiceVideos" rows="6" placeholder="https://youtu.be/aaaaaaaaaaa&#10;https://youtu.be/bbbbbbbbbbb"></textarea>
+          </div>
+        </div>
         <div class="row">
           <button id="addPracticeBtn" class="btn btn-primary">Add problems</button>
           <label class="btn btn-ghost file-btn">⬆ Upload Excel<input type="file" id="practiceFile" accept=".xlsx,.xls,.csv" hidden /></label>

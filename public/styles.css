@@ -267,3 +267,14 @@ textarea, .search, .field input {
 .mini-table th { color: var(--muted); font-weight: 600; }
 .mini-table tr[data-id]:hover td { background: var(--panel-2); }
 .dist-pager { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 10px; }
+
+/* Practice video links */
+.vid-link { font-size: 12px; font-weight: 600; color: #ff4d4f; white-space: nowrap; margin-left: 6px; }
+.vid-link:hover { text-decoration: underline; }
+.stu-vid { color: #ff4d4f !important; border-color: rgba(255,77,79,.4) !important; }
+
+/* Bulk add: question links + video links side by side */
+.bulk-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.bulk-cols textarea { width: 100%; }
+.bulk-label { display: block; font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 5px; }
+@media (max-width: 700px) { .bulk-cols { grid-template-columns: 1fr; } }

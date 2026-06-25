@@ -81,6 +81,12 @@ create table if not exists practice_problems (
 -- For projects created before these columns existed:
 alter table practice_problems add column if not exists topic text;
 alter table practice_problems add column if not exists domain text;
+alter table practice_problems add column if not exists video_url text;
+alter table colleges add column if not exists show_video boolean not null default true;
+-- Denormalized college on monthly_activity for fast whole-college chart aggregates.
+alter table monthly_activity add column if not exists college_id bigint;
+update monthly_activity m set college_id = s.college_id
+  from students s where s.id = m.student_id and m.college_id is null;
 
 create table if not exists practice_completions (
   student_id       bigint not null references students(id) on delete cascade,
@@ -102,5 +108,6 @@ create index if not exists idx_students_college on students(college_id);
 create index if not exists idx_problems_college on practice_problems(college_id);
 create index if not exists idx_snapshots_student on stat_snapshots(student_id);
 create index if not exists idx_ma_student on monthly_activity(student_id);
+create index if not exists idx_ma_college_ym on monthly_activity(college_id, ym);
 create index if not exists idx_pc_student on practice_completions(student_id);
 create index if not exists idx_pc_problem on practice_completions(problem_id);

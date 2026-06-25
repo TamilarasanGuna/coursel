@@ -250,16 +250,50 @@ async function loadDashboard(opts = {}) {
     <div class="card hard"><div class="v">${d.totals.hard}</div><div class="l">Hard</div></div>
     <div class="card"><div class="v">${d.practiceTotal}</div><div class="l">Practice problems</div></div>`;
 
-  if (opts.chart !== false) renderMonthlyChart(d.monthly); // skip on fast auto-refresh to avoid flicker
   if (state.filtersFor !== state.collegeId && d.filters) { populateFilters(d.filters); state.filtersFor = state.collegeId; }
   renderStudents(d.students);
   renderPager();
+  if (opts.chart !== false) loadMonthly(); // chart loads on its own, never blocks the table
+}
+
+// The monthly chart is fetched separately (cached server-side) so it loads
+// immediately and stays accurate without holding up the students table.
+let monthlyAbort = null;
+async function loadMonthly() {
+  if (!state.collegeId) return;
+  const status = $('#monthlyStatus');
+  if (status && !state.monthlyChart) status.textContent = 'Loading…';
+  const dq = state.dash;
+  const qs = new URLSearchParams({ batch: dq.batch, department: dq.department, campus: dq.campus });
+  monthlyAbort?.abort();
+  const ctrl = new AbortController();
+  monthlyAbort = ctrl;
+  let d;
+  try {
+    d = await api(`/colleges/${state.collegeId}/monthly?${qs}`, { signal: ctrl.signal });
+  } catch (e) {
+    if (e.name === 'AbortError' || /abort/i.test(e.message || '')) return; // superseded
+    if (status) status.textContent = 'Couldn’t load the chart. If you just updated the app, restart the server.';
+    return;
+  }
+  const monthly = d.monthly || [];
+  if (status) status.textContent = monthly.length ? '' : 'No submission activity yet.';
+  renderMonthlyChart(monthly);
 }
 
 function resetDash() {
   state.dash = { batch: '', department: '', campus: '', q: '', page: 1, pageSize: 100, total: 0 };
   state.filtersFor = null;
+  state.studentsSig = null; // force a repaint for the new college
+  state.monthlySig = null;
+  if (state.monthlyChart) { state.monthlyChart.destroy(); state.monthlyChart = null; } // drop old college's chart
   const ss = $('#studentSearch'); if (ss) ss.value = '';
+  // Instant feedback: drop the old college's rows and show a loading state so the
+  // switch feels immediate instead of showing stale data until the fetch returns.
+  $('#summaryCards').innerHTML = '';
+  const tb = $('#studentTable').querySelector('tbody');
+  if (tb) tb.innerHTML = '<tr><td colspan="8" class="empty">Loading…</td></tr>';
+  if ($('#pageInfo')) $('#pageInfo').textContent = '';
 }
 
 function fillSel(sel, allLabel, opts, cur) {
@@ -381,6 +415,9 @@ $('#studentSearch').addEventListener('input', (e) => {
 });
 
 function renderMonthlyChart(monthly) {
+  const sig = JSON.stringify(monthly);
+  if (sig === state.monthlySig && state.monthlyChart) return; // unchanged — no rebuild/flicker
+  state.monthlySig = sig;
   const ctx = $('#monthlyChart');
   if (state.monthlyChart) state.monthlyChart.destroy();
   state.monthlyChart = new Chart(ctx, {
@@ -483,6 +520,11 @@ async function populatePracticeColleges() {
 }
 $('#practiceCollege').addEventListener('change', (e) => {
   state.practiceCollegeId = Number(e.target.value);
+  // Instant feedback + force repaint for the newly selected college.
+  state.practiceSig = null;
+  state.practiceDomain = '__all';
+  $('#completionDist').innerHTML = '';
+  $('#practiceTable').querySelector('tbody').innerHTML = '<tr><td colspan="5" class="empty">Loading…</td></tr>';
   loadPractice();
 });
 
@@ -522,6 +564,8 @@ function renderPracticeData(d) {
   state.practiceSig = sig;
 
   renderCompletionDist(d);
+  state.showVideo = !!d.showVideo;
+  setVideoToggleLabel();
   const tbody = $('#practiceTable').querySelector('tbody');
   if (!d.problems.length) {
     $('#domainTabs').innerHTML = '';
@@ -559,7 +603,7 @@ function renderPracticeData(d) {
   const rowHtml = (p) => {
     const pct = d.studentCount ? Math.round((p.completedCount / d.studentCount) * 100) : 0;
     return `<tr>
-      <td><a href="${esc(p.url)}" target="_blank">${esc(p.title)}</a></td>
+      <td><a href="${esc(p.url)}" target="_blank">${esc(p.title)}</a>${p.video_url ? ` <a href="${esc(p.video_url)}" target="_blank" class="vid-link" title="YouTube video">▶ video</a>` : ''}</td>
       <td>${p.difficulty ? `<span class="pill ${(p.difficulty || '').toLowerCase()}">${esc(p.difficulty)}</span>` : '—'}</td>
       <td>${p.completedCount}/${d.studentCount}</td>
       <td><span class="progress"><span style="width:${pct}%"></span></span> ${pct}%</td>
@@ -574,7 +618,7 @@ function renderPracticeData(d) {
       const g = groups[t];
       const key = domName(g[0]) + '|' + t;
       const collapsed = collapsedTopics.has(key);
-      const head = `<tr class="topic-foldrow" data-topic="${esc(key)}"><td colspan="5" style="background:var(--panel-2);font-weight:600;padding-left:18px;cursor:pointer">${collapsed ? '▸' : '▾'} ${esc(t)} <span style="color:var(--muted);font-weight:400">· ${g.length}</span></td></tr>`;
+      const head = `<tr class="topic-foldrow" data-topic="${esc(key)}"><td colspan="5" style="background:var(--panel-2);font-weight:600;padding-left:18px;cursor:pointer">${collapsed ? '▸' : '▾'} ${esc(t)} <span style="color:var(--muted);font-weight:400">· ${g.length}</span><button class="btn btn-sm btn-danger del-topic" data-domain="${esc(domName(g[0]))}" data-topic="${esc(t)}" style="float:right;font-weight:600" title="Remove every question under this topic">🗑 Remove all</button></td></tr>`;
       return head + (collapsed ? '' : g.map(rowHtml).join(''));
     }).join('');
   };
@@ -603,6 +647,17 @@ function renderPracticeData(d) {
     const k = r.dataset.topic;
     collapsedTopics.has(k) ? collapsedTopics.delete(k) : collapsedTopics.add(k);
     renderPracticeData(state.lastPractice); // instant, no refetch
+  }));
+  tbody.querySelectorAll('.del-topic').forEach((b) => b.addEventListener('click', async (e) => {
+    e.stopPropagation(); // don't toggle the fold
+    const dn = b.dataset.domain, tp = b.dataset.topic;
+    if (!confirm(`Remove ALL questions under “${tp}”? This can’t be undone.`)) return;
+    b.disabled = true;
+    try {
+      const r = await api(`/colleges/${practiceCid()}/practice-by-topic?domain=${encodeURIComponent(dn)}&topic=${encodeURIComponent(tp)}`, { method: 'DELETE' });
+      setMsg('#practiceMsg', `Removed ${r.removed} question(s) from “${tp}”.`, 'ok', 5000);
+    } catch (err) { setMsg('#practiceMsg', err.message, 'err'); }
+    loadPractice();
   }));
   tbody.querySelectorAll('.del-prob').forEach((b) => b.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -788,21 +843,44 @@ attachCombo('#practiceDomain', domainOpts);
 attachCombo('#practiceTopic', () => topicsForDomain($('#practiceDomain').value));
 
 // Add a single question (own link + topic + difficulty).
+// Per-college "show video links to students" toggle.
+function setVideoToggleLabel() {
+  const b = $('#videoToggle');
+  if (!b) return;
+  b.textContent = state.showVideo ? '🎬 Videos: shown to students' : '🎬 Videos: hidden from students';
+  b.classList.toggle('btn-primary', state.showVideo);
+  b.classList.toggle('btn-ghost', !state.showVideo);
+}
+$('#videoToggle').addEventListener('click', async () => {
+  const cid = practiceCid();
+  if (!cid) return;
+  const next = !state.showVideo;
+  try {
+    await api(`/colleges/${cid}/video-visibility`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ show: next }),
+    });
+    state.showVideo = next;
+    setVideoToggleLabel();
+  } catch (e) { /* ignore; label stays */ }
+});
+
 $('#addSingleBtn').addEventListener('click', async () => {
   const link = $('#singleLink').value.trim();
   const domain = $('#singleDomain').value.trim();
   const topic = $('#singleTopic').value.trim();
   const difficulty = $('#singleDifficulty').value;
+  const video = $('#singleVideo').value.trim();
   if (!practiceCid()) return setMsg('#singleMsg', 'Pick a college first.', 'err');
   if (!link) return setMsg('#singleMsg', 'Enter a LeetCode link or slug.', 'err');
   try {
     const r = await api(`/colleges/${practiceCid()}/practice`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ links: link, topic, domain, difficulty }),
+      body: JSON.stringify({ links: link, topic, domain, difficulty, video }),
     });
     if (r.added) {
       setMsg('#singleMsg', `Added.`, 'ok', 5000);
-      $('#singleLink').value = ''; // keep topic + difficulty for the next one
+      $('#singleLink').value = ''; $('#singleVideo').value = ''; // keep topic + difficulty for the next one
     } else {
       setMsg('#singleMsg', 'That link could not be parsed.', 'err');
     }
@@ -811,18 +889,19 @@ $('#addSingleBtn').addEventListener('click', async () => {
 });
 
 $('#addPracticeBtn').addEventListener('click', async () => {
-  const links = $('#practiceLinks').value.trim();
+  const links = $('#practiceLinks').value;
+  const videos = $('#practiceVideos').value;
   const domain = $('#practiceDomain').value.trim();
   const topic = $('#practiceTopic').value.trim();
   const difficulty = $('#practiceDifficulty').value;
   if (!practiceCid()) return setMsg('#practiceMsg', 'Pick a college first.', 'err');
-  if (!links) return setMsg('#practiceMsg', 'Paste at least one link.', 'err');
+  if (!links.trim()) return setMsg('#practiceMsg', 'Paste at least one link.', 'err');
   try {
     const r = await api(`/colleges/${practiceCid()}/practice`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ links, topic, domain, difficulty }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ links, videos, topic, domain, difficulty }),
     });
     setMsg('#practiceMsg', `Added ${r.added} problem(s)${topic ? ' under “' + topic + '”' : ''}.` + (r.skipped.length ? ` Skipped ${r.skipped.length}.` : ''), 'ok', 5000);
-    $('#practiceLinks').value = '';
+    $('#practiceLinks').value = ''; $('#practiceVideos').value = '';
     loadPractice();
   } catch (e) { setMsg('#practiceMsg', e.message, 'err'); }
 });
@@ -1004,3 +1083,12 @@ setInterval(() => {
   if (active === 'dashboard') loadDashboard({ chart: false });
   else if (active === 'practice') loadPractice();
 }, 2000);
+
+// Refresh the monthly chart on a slower cadence (it's cached server-side, and
+// the data only changes on sync). Keeps it accurate without blocking anything.
+setInterval(() => {
+  if (document.hidden) return;
+  if ($('#adminLogin').classList.contains('show')) return;
+  if (document.querySelector('.tab.active')?.dataset.tab !== 'dashboard') return;
+  loadMonthly();
+}, 20000);

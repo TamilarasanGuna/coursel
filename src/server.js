@@ -50,16 +50,25 @@ app.use('/api', (req, res, next) => {
 app.use('/api', router);
 
 // Student-facing SPA (gated by college access code, separate from the admin UI).
-app.get(['/student', '/student/'], (req, res) =>
-  res.sendFile('student.html', { root: config.publicDir })
-);
+app.get(['/student', '/student/'], (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile('student.html', { root: config.publicDir });
+});
 
 // Read-only shared college view (resolved client-side by the token in the URL).
-app.get('/view/:token', (req, res) =>
-  res.sendFile('view.html', { root: config.publicDir })
-);
+app.get('/view/:token', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile('view.html', { root: config.publicDir });
+});
 
-app.use(express.static(config.publicDir));
+// Don't let browsers cache the app files — otherwise a tab (e.g. the student
+// page) can keep running an old student.js/HTML after an update. The data still
+// comes fresh from /api; this only stops stale code/markup being reused.
+app.use(express.static(config.publicDir, {
+  setHeaders: (res, path) => {
+    if (/\.(html|js|css)$/.test(path)) res.setHeader('Cache-Control', 'no-cache');
+  },
+}));
 
 app.listen(config.port, () => {
   console.log(`\n  LeetCode Admin Dashboard`);

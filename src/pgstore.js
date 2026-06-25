@@ -175,6 +175,13 @@ export async function getCollegeTotals(collegeId, f = {}) {
 }
 
 export async function getCollegeMonthly(collegeId, f = {}) {
+  // Fast path (whole college, no student-attribute filters): denormalized column + index, no join.
+  if (!f.batch && !f.department && !f.campus && !f.q) {
+    const { rows } = await q(
+      `SELECT ym, SUM(submissions)::int AS submissions FROM monthly_activity
+       WHERE college_id = $1 GROUP BY ym ORDER BY ym`, [collegeId]);
+    return rows;
+  }
   const { where, params } = studentWhere(collegeId, f);
   const { rows } = await q(`
     SELECT ym, SUM(submissions)::int AS submissions
@@ -281,8 +288,9 @@ export async function saveStudentStats(id, stats) {
     );
     for (const [ym, count] of Object.entries(monthly)) {
       await client.query(
-        `INSERT INTO monthly_activity(student_id, ym, submissions) VALUES ($1,$2,$3)
-         ON CONFLICT (student_id, ym) DO UPDATE SET submissions=EXCLUDED.submissions`,
+        `INSERT INTO monthly_activity(student_id, ym, submissions, college_id)
+         VALUES ($1,$2,$3, (SELECT college_id FROM students WHERE id=$1))
+         ON CONFLICT (student_id, ym) DO UPDATE SET submissions=EXCLUDED.submissions, college_id=EXCLUDED.college_id`,
         [id, ym, count]
       );
     }
@@ -349,22 +357,27 @@ export async function getMonthlySolvedGrowth(studentId) {
 
 // ---- Practice helpers -------------------------------------------------------
 
-export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic, domain }) {
+export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic, domain, video_url }) {
   const { rows } = await q(
-    `INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic, domain)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
+    `INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic, domain, video_url)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      ON CONFLICT (college_id, slug) DO UPDATE SET
        title=EXCLUDED.title, url=EXCLUDED.url, difficulty=EXCLUDED.difficulty,
-       topic=EXCLUDED.topic, domain=EXCLUDED.domain
+       topic=EXCLUDED.topic, domain=EXCLUDED.domain,
+       video_url=COALESCE(EXCLUDED.video_url, practice_problems.video_url)
      RETURNING id`,
-    [college_id, title, slug, url, difficulty, topic ?? null, domain ?? null]
+    [college_id, title, slug, url, difficulty, topic ?? null, domain ?? null, video_url ?? null]
   );
   return rows[0].id;
 }
 
+export async function setShowVideo(collegeId, show) {
+  await q('UPDATE colleges SET show_video=$1 WHERE id=$2', [show ? true : false, collegeId]);
+}
+
 export async function listPracticeProblems(collegeId) {
   const { rows } = await q(
-    `SELECT id, college_id, title, slug, url, difficulty, topic, domain, ${TS('created_at', 'created_at')}
+    `SELECT id, college_id, title, slug, url, difficulty, topic, domain, video_url, ${TS('created_at', 'created_at')}
      FROM practice_problems WHERE college_id=$1 ORDER BY domain NULLS FIRST, topic NULLS FIRST, created_at DESC`,
     [collegeId]
   );
@@ -432,6 +445,19 @@ export async function countPracticeProblems(collegeId) {
 
 export async function deletePracticeProblem(id) {
   await q('DELETE FROM practice_problems WHERE id=$1', [id]);
+}
+
+// Remove every question under one domain+topic. null matches "Uncategorized".
+export async function deletePracticeByTopic(collegeId, domain, topic) {
+  const params = [collegeId];
+  let n = 1;
+  const domCond = domain === null ? "(domain IS NULL OR domain='')" : `domain=$${++n}`;
+  if (domain !== null) params.push(domain);
+  const topCond = topic === null ? "(topic IS NULL OR topic='')" : `topic=$${++n}`;
+  if (topic !== null) params.push(topic);
+  const { rowCount } = await q(
+    `DELETE FROM practice_problems WHERE college_id=$1 AND ${domCond} AND ${topCond}`, params);
+  return rowCount;
 }
 
 export async function markCompletion(studentId, problemId, solvedTimestamp) {

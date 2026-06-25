@@ -193,7 +193,7 @@ function renderStudents(students) {
 
 function renderPractice(d) {
   const sig = JSON.stringify([d.studentCount, d.domainOrder, d.topicOrder, viewPracticeDomain,
-    [...collapsedDomains], [...collapsedTopics], d.practice.map((p) => [p.id, p.title, p.difficulty, p.topic, p.domain, p.completedCount])]);
+    [...collapsedDomains], [...collapsedTopics], d.practice.map((p) => [p.id, p.title, p.difficulty, p.topic, p.domain, p.completedCount, p.video_url])]);
   if (sig === renderPractice._sig) return; // skip rebuild when unchanged
   renderPractice._sig = sig;
   renderViewDist(d);
@@ -219,7 +219,7 @@ function renderPractice(d) {
   const row = (p) => {
     const pct = d.studentCount ? Math.round((p.completedCount / d.studentCount) * 100) : 0;
     return `<tr>
-      <td><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a></td>
+      <td><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>${p.video_url ? ` <a href="${esc(p.video_url)}" target="_blank" rel="noopener" class="vid-link" title="YouTube video">▶ video</a>` : ''}</td>
       <td>${p.difficulty ? `<span class="pill ${(p.difficulty || '').toLowerCase()}">${esc(p.difficulty)}</span>` : '—'}</td>
       <td>${p.completedCount}/${d.studentCount}</td>
       <td><span class="progress"><span style="width:${pct}%"></span></span> ${pct}%</td></tr>`;

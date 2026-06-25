@@ -357,7 +357,7 @@ function renderPractice(p, domainOrder, topicOrder) {
   lastPractice = p; lastDomainOrder = domainOrder || lastDomainOrder; lastTopicOrder = topicOrder || lastTopicOrder;
   // Skip the rebuild when nothing relevant changed (no flicker on the 10s refresh).
   const sig = JSON.stringify([lastDomainOrder, lastTopicOrder, studentDomain, [...collapsedDomains], [...collapsedTopics],
-    p.map((x) => [x.id, x.title, x.difficulty, x.topic, x.domain, x.completed])]);
+    p.map((x) => [x.id, x.title, x.difficulty, x.topic, x.domain, x.completed, x.video_url])]);
   if (sig === renderPractice._sig) return;
   renderPractice._sig = sig;
   const domCmp = mkOrderCmp(lastDomainOrder), topCmp = mkOrderCmp(lastTopicOrder);
@@ -378,6 +378,7 @@ function renderPractice(p, domainOrder, topicOrder) {
     <div class="stu-badge ${x.completed ? 'done' : 'todo'}">${x.completed ? '✓' : '•'}</div>
     <div class="stu-prac-title"><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a></div>
     ${x.difficulty ? `<span class="pill ${(x.difficulty || '').toLowerCase()}">${esc(x.difficulty)}</span>` : ''}
+    ${x.video_url ? `<a class="btn btn-sm btn-ghost stu-vid" href="${esc(x.video_url)}" target="_blank" rel="noopener" title="Watch explanation">▶ Video</a>` : ''}
     <a class="btn btn-sm ${x.completed ? 'btn-ghost' : 'btn-primary'}" href="${esc(x.url)}" target="_blank" rel="noopener">${x.completed ? 'Review' : 'Solve →'}</a>
   </div>`;
 

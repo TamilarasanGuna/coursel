@@ -29,6 +29,10 @@ function tokenValid(token) {
   return true;
 }
 
+// Videos are shown by default; only an explicit "off" (0 / false) hides them.
+// This keeps videos visible even if the show_video column is missing/unset.
+const videoShown = (col) => !(col && (col.show_video === 0 || col.show_video === false));
+
 // Endpoints that stay open regardless of admin auth (student + shared-link + auth itself).
 function isPublicReq(req) {
   const p = req.path, m = req.method;
@@ -156,17 +160,29 @@ router.get('/view/:token', h(async (req, res) => {
   };
 
   const light = req.query.light === '1';
-  const problems = await store.listPracticeProblems(c.id);
-  const { rows, total, offset } = await store.getStudentsPage(c.id, f);
+  // Independent queries run together; only the per-page completion counts wait on rows.
+  const [problems, pageData, problemCounts, collegeTotalsAll, totals, monthly, filters,
+    domainOrder, topicOrder, completionDist] = await Promise.all([
+    store.listPracticeProblems(c.id),
+    store.getStudentsPage(c.id, f),
+    store.getCompletedCountsByProblem(c.id),
+    store.getCollegeTotals(c.id, {}),
+    store.getCollegeTotals(c.id, f),
+    light ? Promise.resolve([]) : store.getCollegeMonthly(c.id, f),
+    light ? Promise.resolve(null) : store.getFilterOptions(c.id),
+    store.listDomains(c.id),
+    store.listTopics(c.id),
+    store.getPracticeDistribution(c.id),
+  ]);
+  const { rows, total, offset } = pageData;
   const studentCounts = await store.getCompletedCountsForStudents(rows.map((s) => s.id));
-  const problemCounts = await store.getCompletedCountsByProblem(c.id);
-  const collegeStudentCount = (await store.getCollegeTotals(c.id, {})).students;
+  const collegeStudentCount = collegeTotalsAll.students;
 
   res.json({
     college: { name: c.name },
-    totals: await store.getCollegeTotals(c.id, f),
-    monthly: light ? [] : await store.getCollegeMonthly(c.id, f),
-    filters: light ? null : await store.getFilterOptions(c.id),
+    totals,
+    monthly,
+    filters,
     page: f.page,
     pageSize: f.pageSize,
     total,
@@ -178,15 +194,17 @@ router.get('/view/:token', h(async (req, res) => {
       practiceTotal: problems.length,
     })),
     studentCount: collegeStudentCount,
-    domainOrder: await store.listDomains(c.id),
-    topicOrder: await store.listTopics(c.id),
-    completionDist: await store.getPracticeDistribution(c.id),
+    domainOrder,
+    topicOrder,
+    completionDist,
+    showVideo: videoShown(c),
     practice: problems.map((p) => ({
       title: p.title,
       url: p.url,
       difficulty: p.difficulty,
       topic: p.topic || null,
       domain: p.domain || null,
+      video_url: videoShown(c) ? (p.video_url || null) : null,
       completedCount: problemCounts[p.id] || 0,
     })),
   });
@@ -309,6 +327,8 @@ router.get('/student/:studentId/dashboard', h(async (req, res) => {
   const completions = await store.getCompletionsForStudent(student.id);
   const compIds = new Set(completions.map((c) => c.problem_id));
   const problems = await store.getPracticeProblemsByCollege(student.college_id);
+  const college = await store.getCollege(student.college_id);
+  const showVideo = videoShown(college);
 
   res.json({
     me: {
@@ -344,6 +364,7 @@ router.get('/student/:studentId/dashboard', h(async (req, res) => {
     monthlySolvedGrowth: await store.getMonthlySolvedGrowth(student.id),
     domainOrder: await store.listDomains(student.college_id),
     topicOrder: await store.listTopics(student.college_id),
+    showVideo,
     practice: problems.map((p) => ({
       id: p.id,
       title: p.title,
@@ -351,6 +372,7 @@ router.get('/student/:studentId/dashboard', h(async (req, res) => {
       difficulty: p.difficulty,
       topic: p.topic || null,
       domain: p.domain || null,
+      video_url: showVideo ? (p.video_url || null) : null,
       completed: compIds.has(p.id),
       completed_at: completions.find((c) => c.problem_id === p.id)?.completed_at || null,
     })),
@@ -417,11 +439,19 @@ router.get('/colleges/:id/dashboard', h(async (req, res) => {
     pageSize: Math.min(500, Math.max(1, Number(req.query.pageSize) || 100)),
   };
 
-  const light = req.query.light === '1'; // auto-refresh: skip the heavy monthly/filter queries
-  const practiceTotal = await store.countPracticeProblems(collegeId);
-  const { rows, total, offset } = await store.getStudentsPage(collegeId, f);
+  const light = req.query.light === '1'; // auto-refresh: skip the filter query
 
-  // completion counts only for the visible page (aggregate, not row dumps)
+  // The monthly chart is fetched separately (its own cached endpoint) so the
+  // students table never waits on that heavy college-wide aggregate.
+  const [practiceTotal, pageData, totals, filters] = await Promise.all([
+    store.countPracticeProblems(collegeId),
+    store.getStudentsPage(collegeId, f),
+    store.getCollegeTotals(collegeId, f),
+    light ? Promise.resolve(null) : store.getFilterOptions(collegeId),
+  ]);
+  const { rows, total, offset } = pageData;
+
+  // completion counts depend on the page rows, so this one runs after.
   const counts = await store.getCompletedCountsForStudents(rows.map((s) => s.id));
 
   const students = rows.map((s, i) => ({
@@ -431,16 +461,28 @@ router.get('/colleges/:id/dashboard', h(async (req, res) => {
     practiceTotal,
   }));
 
-  res.json({
-    students,
-    practiceTotal,
-    totals: await store.getCollegeTotals(collegeId, f),
-    monthly: light ? [] : await store.getCollegeMonthly(collegeId, f),
-    filters: light ? null : await store.getFilterOptions(collegeId),
-    page: f.page,
-    pageSize: f.pageSize,
-    total,
-  });
+  res.json({ students, practiceTotal, totals, monthly: [], filters, page: f.page, pageSize: f.pageSize, total });
+}));
+
+// Monthly submission activity for the whole college (the dashboard chart).
+// Fetched on its own so it never blocks the table, and cached briefly because
+// it only changes on sync — repeated/auto-refresh hits are then instant.
+const monthlyCache = new Map(); // key -> { at, data }
+const MONTHLY_TTL_MS = 20000;
+function invalidateMonthlyCache() { monthlyCache.clear(); }
+router.get('/colleges/:id/monthly', h(async (req, res) => {
+  const collegeId = Number(req.params.id);
+  const f = {
+    batch: (req.query.batch || '').trim(),
+    department: (req.query.department || '').trim(),
+    campus: (req.query.campus || '').trim(),
+  };
+  const key = collegeId + '|' + JSON.stringify(f);
+  const hit = monthlyCache.get(key);
+  if (hit && Date.now() - hit.at < MONTHLY_TTL_MS) return res.json({ monthly: hit.data, cached: true });
+  const monthly = await store.getCollegeMonthly(collegeId, f);
+  monthlyCache.set(key, { at: Date.now(), data: monthly });
+  res.json({ monthly });
 }));
 
 // ---- Student detail ---------------------------------------------------------
@@ -483,20 +525,34 @@ router.post('/students/:id/reset-baseline', h(async (req, res) => {
 
 router.get('/colleges/:id/practice', h(async (req, res) => {
   const collegeId = Number(req.params.id);
-  const problems = await store.listPracticeProblems(collegeId);
-  const problemCounts = await store.getCompletedCountsByProblem(collegeId); // aggregate
-  const studentCount = (await store.getCollegeTotals(collegeId, {})).students;
-
+  const [problems, problemCounts, totalsAll, topics, domains, completionDist, college] = await Promise.all([
+    store.listPracticeProblems(collegeId),
+    store.getCompletedCountsByProblem(collegeId),
+    store.getCollegeTotals(collegeId, {}),
+    store.listTopics(collegeId),
+    store.listDomains(collegeId),
+    store.getPracticeDistribution(collegeId),
+    store.getCollege(collegeId),
+  ]);
   res.json({
-    studentCount,
-    topics: await store.listTopics(collegeId),
-    domains: await store.listDomains(collegeId),
-    completionDist: await store.getPracticeDistribution(collegeId),
+    studentCount: totalsAll.students,
+    topics,
+    domains,
+    completionDist,
+    showVideo: videoShown(college),
     problems: problems.map((p) => ({
       ...p,
       completedCount: problemCounts[p.id] || 0,
     })),
   });
+}));
+
+// Toggle whether students see the video links for this college.
+router.post('/colleges/:id/video-visibility', h(async (req, res) => {
+  const collegeId = Number(req.params.id);
+  const show = !!req.body?.show;
+  await store.setShowVideo(collegeId, show);
+  res.json({ ok: true, showVideo: show });
 }));
 
 // Drill-down: students who completed exactly N assigned problems.
@@ -526,6 +582,7 @@ router.post('/colleges/:id/practice', upload.single('file'), h(async (req, res) 
   const formTopic = (req.body.topic || '').trim() || null;      // applies to all when set
   const formDomain = (req.body.domain || '').trim() || null;
   const formDifficulty = (req.body.difficulty || '').trim() || null;
+  const formVideo = (req.body.video || '').trim() || null;
   const items = [];
 
   if (req.file) {
@@ -540,11 +597,20 @@ router.post('/colleges/:id/practice', upload.single('file'), h(async (req, res) 
         difficulty: pick(row, ['difficulty', 'level']) || formDifficulty, // row value wins
         topic: pick(row, ['topic', 'category', 'tag']) || formTopic,
         domain: pick(row, ['domain', 'area', 'subject']) || formDomain,
+        video: pick(row, ['video', 'video link', 'video url', 'youtube', 'youtube link']) || formVideo,
       });
     }
   } else {
-    const links = (req.body.links || '').split(/[\n,]+/).map((l) => l.trim()).filter(Boolean);
-    for (const url of links) items.push({ url, topic: formTopic, domain: formDomain, difficulty: formDifficulty });
+    // Pair the two textareas by line: question on line N ↔ video on line N.
+    // Split on newlines only (not commas) so line positions stay aligned.
+    const linkLines = (req.body.links || '').split(/\r?\n/);
+    const videoLines = (req.body.videos || '').split(/\r?\n/);
+    linkLines.forEach((raw, i) => {
+      const url = raw.trim();
+      if (!url) return;
+      const video = (videoLines[i] || '').trim() || formVideo;
+      items.push({ url, topic: formTopic, domain: formDomain, difficulty: formDifficulty, video });
+    });
   }
 
   if (!items.length) return res.status(400).json({ error: 'No problem links found.' });
@@ -563,6 +629,7 @@ router.post('/colleges/:id/practice', upload.single('file'), h(async (req, res) 
       difficulty: it.difficulty || null,
       topic: it.topic || null,
       domain: it.domain || null,
+      video_url: it.video || null,
     });
     added.push({ id, slug });
   }
@@ -572,6 +639,15 @@ router.post('/colleges/:id/practice', upload.single('file'), h(async (req, res) 
 router.delete('/practice/:id', h(async (req, res) => {
   await store.deletePracticeProblem(Number(req.params.id));
   res.json({ ok: true });
+}));
+
+// Remove every question under one domain+topic ("Remove all" on a topic header).
+router.delete('/colleges/:id/practice-by-topic', h(async (req, res) => {
+  const collegeId = Number(req.params.id);
+  const domain = (req.query.domain || '') === 'Uncategorized' ? null : (req.query.domain || '');
+  const topic = (req.query.topic || '') === 'Uncategorized' ? null : (req.query.topic || '');
+  const removed = await store.deletePracticeByTopic(collegeId, domain, topic);
+  res.json({ removed });
 }));
 
 // ---- Sync controls ----------------------------------------------------------
@@ -612,6 +688,7 @@ router.post('/ingest', h(async (req, res) => {
     collegeId = (await store.getOrCreateCollege(String(college))).id;
   }
   const summary = await ingestResults(collegeId, results);
+  invalidateMonthlyCache(); // fresh submissions arrived — drop the cached chart
   res.json({ ok: true, collegeId, ...summary });
 }));
 
@@ -650,6 +727,7 @@ router.post('/import-csv', upload.single('file'), h(async (req, res) => {
 
   const collegeId = (await store.getOrCreateCollege(collegeName)).id;
   const summary = await ingestResults(collegeId, results);
+  invalidateMonthlyCache(); // fresh submissions arrived — drop the cached chart
   res.json({ ok: true, collegeId, ...summary });
 }));
 
@@ -673,10 +751,10 @@ router.get('/template', (req, res) => {
 router.get('/practice-template', (req, res) => {
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([
-    ['URL', 'Domain', 'Topic', 'Difficulty', 'Title'],
-    ['https://leetcode.com/problems/missing-number/', 'Fundamentals of Programming', 'Array', 'Easy', 'Missing Number'],
-    ['https://leetcode.com/problems/add-two-numbers/', 'Data Structures', 'Linked List', 'Medium', ''],
-    ['trapping-rain-water', 'Algorithms', 'Two Pointers', 'Hard', ''],
+    ['URL', 'Domain', 'Topic', 'Difficulty', 'Title', 'Video'],
+    ['https://leetcode.com/problems/missing-number/', 'Fundamentals of Programming', 'Array', 'Easy', 'Missing Number', 'https://youtu.be/WnPLSRLSANE'],
+    ['https://leetcode.com/problems/add-two-numbers/', 'Data Structures', 'Linked List', 'Medium', '', ''],
+    ['trapping-rain-water', 'Algorithms', 'Two Pointers', 'Hard', '', ''],
   ]);
   XLSX.utils.book_append_sheet(wb, ws, 'Problems');
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });

@@ -95,6 +95,10 @@ if (!collegeCols.some((c) => c.name === 'access_code')) {
 if (!collegeCols.some((c) => c.name === 'view_token')) {
   db.exec('ALTER TABLE colleges ADD COLUMN view_token TEXT');
 }
+// Per-college switch: show practice video links to students (1 = show, 0 = hide).
+if (!collegeCols.some((c) => c.name === 'show_video')) {
+  db.exec('ALTER TABLE colleges ADD COLUMN show_video INTEGER NOT NULL DEFAULT 1');
+}
 const problemCols = db.prepare('PRAGMA table_info(practice_problems)').all();
 if (!problemCols.some((c) => c.name === 'topic')) {
   db.exec('ALTER TABLE practice_problems ADD COLUMN topic TEXT');
@@ -102,6 +106,19 @@ if (!problemCols.some((c) => c.name === 'topic')) {
 if (!problemCols.some((c) => c.name === 'domain')) {
   db.exec('ALTER TABLE practice_problems ADD COLUMN domain TEXT');
 }
+if (!problemCols.some((c) => c.name === 'video_url')) {
+  db.exec('ALTER TABLE practice_problems ADD COLUMN video_url TEXT');
+}
+// Denormalize college_id onto monthly_activity so the whole-college chart is a
+// single indexed scan instead of a per-student join. Backfill existing rows.
+const maCols = db.prepare('PRAGMA table_info(monthly_activity)').all();
+if (!maCols.some((c) => c.name === 'college_id')) {
+  db.exec('ALTER TABLE monthly_activity ADD COLUMN college_id INTEGER');
+  db.exec(`UPDATE monthly_activity SET college_id =
+    (SELECT college_id FROM students WHERE students.id = monthly_activity.student_id)
+    WHERE college_id IS NULL`);
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_ma_college_ym ON monthly_activity(college_id, ym)');
 // Baseline = the stats captured on a student's FIRST successful sync, so we can
 // show progress (current minus baseline) on every sync afterwards.
 const studentCols = db.prepare('PRAGMA table_info(students)').all();
@@ -237,6 +254,13 @@ export async function getCollegeTotals(collegeId, f = {}) {
 }
 
 export async function getCollegeMonthly(collegeId, f = {}) {
+  // Fast path (the common "whole college" case): no student-attribute filters,
+  // so read straight off the denormalized column + index — no join.
+  if (!f.batch && !f.department && !f.campus && !f.q) {
+    return db.prepare(
+      `SELECT ym, SUM(submissions) AS submissions FROM monthly_activity
+       WHERE college_id = ? GROUP BY ym ORDER BY ym`).all(collegeId);
+  }
   const { where, params } = studentWhere(collegeId, f);
   return db.prepare(`
     SELECT ym, SUM(submissions) AS submissions
@@ -309,13 +333,15 @@ export async function saveStudentStats(id, stats) {
     const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
     monthly[ym] = (monthly[ym] || 0) + Number(count);
   }
+  const crow = db.prepare('SELECT college_id FROM students WHERE id=?').get(id);
+  const cid = crow ? crow.college_id : null;
   const up = db.prepare(`
-    INSERT INTO monthly_activity(student_id, ym, submissions) VALUES (?,?,?)
-    ON CONFLICT(student_id, ym) DO UPDATE SET submissions=excluded.submissions`);
+    INSERT INTO monthly_activity(student_id, ym, submissions, college_id) VALUES (?,?,?,?)
+    ON CONFLICT(student_id, ym) DO UPDATE SET submissions=excluded.submissions, college_id=excluded.college_id`);
   const entries = Object.entries(monthly);
   db.exec('BEGIN');
   try {
-    for (const [ym, count] of entries) up.run(id, ym, count);
+    for (const [ym, count] of entries) up.run(id, ym, count, cid);
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');
@@ -375,15 +401,21 @@ export async function getMonthlySolvedGrowth(studentId) {
 
 // ---- Practice helpers -------------------------------------------------------
 
-export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic, domain }) {
+export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic, domain, video_url }) {
   const stmt = db.prepare(`
-    INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic, domain)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic, domain, video_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(college_id, slug) DO UPDATE SET
       title=excluded.title, url=excluded.url, difficulty=excluded.difficulty,
-      topic=excluded.topic, domain=excluded.domain
+      topic=excluded.topic, domain=excluded.domain,
+      video_url=COALESCE(excluded.video_url, practice_problems.video_url)
     RETURNING id`);
-  return stmt.get(college_id, title, slug, url, difficulty, topic ?? null, domain ?? null).id;
+  return stmt.get(college_id, title, slug, url, difficulty, topic ?? null, domain ?? null, video_url ?? null).id;
+}
+
+// Per-college toggle for showing video links in the student/shared views.
+export async function setShowVideo(collegeId, show) {
+  db.prepare('UPDATE colleges SET show_video=? WHERE id=?').run(show ? 1 : 0, collegeId);
 }
 
 export const listPracticeProblems = async (collegeId) =>
@@ -432,6 +464,19 @@ export const countPracticeProblems = async (collegeId) =>
 
 export const deletePracticeProblem = async (id) =>
   db.prepare('DELETE FROM practice_problems WHERE id=?').run(id);
+
+// Remove every question under one domain+topic. `domain`/`topic` may be null to
+// match the "Uncategorized" bucket (NULL or empty string).
+export async function deletePracticeByTopic(collegeId, domain, topic) {
+  const domCond = domain === null ? "(domain IS NULL OR domain='')" : 'domain=?';
+  const topCond = topic === null ? "(topic IS NULL OR topic='')" : 'topic=?';
+  const params = [collegeId];
+  if (domain !== null) params.push(domain);
+  if (topic !== null) params.push(topic);
+  return db.prepare(
+    `DELETE FROM practice_problems WHERE college_id=? AND ${domCond} AND ${topCond}`
+  ).run(...params).changes;
+}
 
 export async function markCompletion(studentId, problemId, solvedTimestamp) {
   const r = db.prepare(`
