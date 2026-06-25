@@ -64,6 +64,15 @@ db.exec(`
     solved_timestamp  INTEGER,
     PRIMARY KEY (student_id, problem_id)
   );
+
+  -- Custom ordering for domains/topics (admin drag-to-reorder).
+  CREATE TABLE IF NOT EXISTS practice_order (
+    college_id INTEGER NOT NULL REFERENCES colleges(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,            -- 'domain' | 'topic'
+    name       TEXT NOT NULL,
+    position   INTEGER NOT NULL,
+    PRIMARY KEY (college_id, kind, name)
+  );
 `);
 
 // Indexes for the hot paths (foreign keys used in joins/aggregates).
@@ -384,13 +393,33 @@ export const listPracticeProblems = async (collegeId) =>
 // Distinct topics / domains used by a college (for the add-problem pickers + tabs).
 export const listTopics = async (collegeId) =>
   db.prepare(
-    "SELECT DISTINCT topic FROM practice_problems WHERE college_id=? AND topic IS NOT NULL AND topic<>'' ORDER BY topic"
-  ).all(collegeId).map((r) => r.topic);
+    `SELECT DISTINCT pp.topic AS name, COALESCE(po.position, 1000000) AS pos
+     FROM practice_problems pp
+     LEFT JOIN practice_order po ON po.college_id=pp.college_id AND po.kind='topic' AND po.name=pp.topic
+     WHERE pp.college_id=? AND pp.topic IS NOT NULL AND pp.topic<>''
+     ORDER BY pos, name`
+  ).all(collegeId).map((r) => r.name);
 
 export const listDomains = async (collegeId) =>
   db.prepare(
-    "SELECT DISTINCT domain FROM practice_problems WHERE college_id=? AND domain IS NOT NULL AND domain<>'' ORDER BY domain"
-  ).all(collegeId).map((r) => r.domain);
+    `SELECT DISTINCT pp.domain AS name, COALESCE(po.position, 1000000) AS pos
+     FROM practice_problems pp
+     LEFT JOIN practice_order po ON po.college_id=pp.college_id AND po.kind='domain' AND po.name=pp.domain
+     WHERE pp.college_id=? AND pp.domain IS NOT NULL AND pp.domain<>''
+     ORDER BY pos, name`
+  ).all(collegeId).map((r) => r.name);
+
+// Save a custom order for domains or topics (positions = array index).
+export async function setPracticeOrder(collegeId, kind, names) {
+  const del = db.prepare('DELETE FROM practice_order WHERE college_id=? AND kind=?');
+  const ins = db.prepare('INSERT INTO practice_order(college_id, kind, name, position) VALUES (?,?,?,?)');
+  db.exec('BEGIN');
+  try {
+    del.run(collegeId, kind);
+    names.forEach((n, i) => ins.run(collegeId, kind, n, i));
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
 
 export const getPracticeProblemsByCollege = async (collegeId) =>
   db.prepare('SELECT * FROM practice_problems WHERE college_id=?').all(collegeId);
@@ -443,3 +472,31 @@ export async function getCompletedCountsByProblem(collegeId) {
 export const getCompletionsForStudent = async (studentId) =>
   db.prepare('SELECT problem_id, completed_at FROM practice_completions WHERE student_id=?')
     .all(studentId);
+
+// Distribution: for each "number of assigned problems completed", how many students.
+// Students with zero completions are included (cnt = 0).
+export async function getPracticeDistribution(collegeId) {
+  const rows = db.prepare(
+    `SELECT cnt, COUNT(*) AS students FROM (
+       SELECT s.id AS sid, COUNT(pp.id) AS cnt
+       FROM students s
+       LEFT JOIN practice_completions pc ON pc.student_id = s.id
+       LEFT JOIN practice_problems pp ON pp.id = pc.problem_id AND pp.college_id = s.college_id
+       WHERE s.college_id = ?
+       GROUP BY s.id
+     ) t GROUP BY cnt ORDER BY cnt`
+  ).all(collegeId);
+  return rows.map((r) => ({ completed: r.cnt, students: r.students }));
+}
+
+// The students who completed exactly `count` assigned problems (on-demand drill-down).
+export async function getStudentsByCompletedCount(collegeId, count) {
+  return db.prepare(
+    `SELECT s.id, s.name, s.username, s.register_number, s.section, s.department, COUNT(pp.id) AS cnt
+     FROM students s
+     LEFT JOIN practice_completions pc ON pc.student_id = s.id
+     LEFT JOIN practice_problems pp ON pp.id = pc.problem_id AND pp.college_id = s.college_id
+     WHERE s.college_id = ?
+     GROUP BY s.id HAVING cnt = ? ORDER BY s.name`
+  ).all(collegeId, count);
+}

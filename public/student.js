@@ -11,6 +11,9 @@ let myChart = null;
 let dashAnimated = false; // entrance + count-up run once per session, not on each refresh
 let studentDomain = '__all'; // selected domain tab in the practice list
 let lastPractice = []; // cached practice list so domain tab clicks can re-render
+let lastDomainOrder = [], lastTopicOrder = []; // cached saved order
+const collapsedDomains = new Set(); // folded domains in the practice list
+const collapsedTopics = new Set(); // folded topics (keyed by domain|topic)
 
 function lcChartColors() {
   const cs = getComputedStyle(document.documentElement);
@@ -163,7 +166,7 @@ async function loadDashboard(opts = {}) {
   renderTiles(me);
   if (opts.chart !== false) renderMyMonthly(d.monthlyActivity); // skip on auto-refresh to avoid flicker
   renderProgress(d.me, d.monthlySolvedGrowth);
-  renderPractice(d.practice);
+  renderPractice(d.practice, d.domainOrder, d.topicOrder);
 
   if (!dashAnimated) { dashAnimated = true; animateEntrance(); animateNumbers(); }
 }
@@ -341,8 +344,23 @@ function renderProgress(me, growth) {
   $('#myProgress').innerHTML = html;
 }
 
-function renderPractice(p) {
-  lastPractice = p;
+function mkOrderCmp(orderArr) {
+  const idx = new Map((orderArr || []).map((n, i) => [n, i]));
+  return (a, b) => {
+    if (a === 'Uncategorized') return 1;
+    if (b === 'Uncategorized') return -1;
+    const ia = idx.has(a) ? idx.get(a) : 1e9, ib = idx.has(b) ? idx.get(b) : 1e9;
+    return ia - ib || a.localeCompare(b);
+  };
+}
+function renderPractice(p, domainOrder, topicOrder) {
+  lastPractice = p; lastDomainOrder = domainOrder || lastDomainOrder; lastTopicOrder = topicOrder || lastTopicOrder;
+  // Skip the rebuild when nothing relevant changed (no flicker on the 10s refresh).
+  const sig = JSON.stringify([lastDomainOrder, lastTopicOrder, studentDomain, [...collapsedDomains], [...collapsedTopics],
+    p.map((x) => [x.id, x.title, x.difficulty, x.topic, x.domain, x.completed])]);
+  if (sig === renderPractice._sig) return;
+  renderPractice._sig = sig;
+  const domCmp = mkOrderCmp(lastDomainOrder), topCmp = mkOrderCmp(lastTopicOrder);
   const done = p.filter((x) => x.completed).length;
   $('#practiceSummary').textContent = p.length ? `${done} / ${p.length} solved` : '';
   const cont = $('#myPracticeList');
@@ -355,7 +373,6 @@ function renderPractice(p) {
 
   const dom = (x) => (x.domain && x.domain.trim()) || 'Uncategorized';
   const top = (x) => (x.topic && x.topic.trim()) || 'Uncategorized';
-  const sortG = (a, b) => (a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b));
 
   const item = (x) => `<div class="stu-prac">
     <div class="stu-badge ${x.completed ? 'done' : 'todo'}">${x.completed ? '✓' : '•'}</div>
@@ -367,26 +384,34 @@ function renderPractice(p) {
   const topicBlocks = (probs) => {
     const groups = {};
     for (const x of probs) (groups[top(x)] ||= []).push(x);
-    return Object.keys(groups).sort(sortG).map((t) => {
+    return Object.keys(groups).sort(topCmp).map((t) => {
       const g = groups[t];
       const solved = g.filter((x) => x.completed).length;
       const pct = Math.round((solved / g.length) * 100);
-      return `<div class="stu-topic-head">
-          <span class="name">${esc(t)}</span>
+      const key = dom(g[0]) + '|' + t;
+      const collapsed = collapsedTopics.has(key);
+      return `<div class="stu-topic-head" data-topic="${esc(key)}" style="cursor:pointer">
+          <span class="name">${collapsed ? '▸' : '▾'} ${esc(t)}</span>
           <span class="stu-topic-bar"><span style="width:${pct}%"></span></span>
           <span class="hint" style="white-space:nowrap">${solved}/${g.length}</span>
-        </div>${g.map(item).join('')}`;
+        </div>${collapsed ? '' : g.map(item).join('')}`;
     }).join('');
   };
 
+  const wireTopicFold = () => cont.querySelectorAll('.stu-topic-head[data-topic]').forEach((el) => el.addEventListener('click', () => {
+    const k = el.dataset.topic;
+    collapsedTopics.has(k) ? collapsedTopics.delete(k) : collapsedTopics.add(k);
+    renderPractice(lastPractice, lastDomainOrder, lastTopicOrder);
+  }));
   const domGroups = {};
   for (const x of p) (domGroups[dom(x)] ||= []).push(x);
-  const domNames = Object.keys(domGroups).sort(sortG);
+  const domNames = Object.keys(domGroups).sort(domCmp);
 
   // No domains assigned -> just topics, no tabs.
   if (domNames.length === 1 && domNames[0] === 'Uncategorized') {
     tabsEl.innerHTML = '';
     cont.innerHTML = topicBlocks(p);
+    wireTopicFold();
     return;
   }
 
@@ -398,16 +423,24 @@ function renderPractice(p) {
     domNames.map((dn) => `<button class="dom-tab ${sel === dn ? 'active' : ''}" data-dom="${esc(dn)}">${esc(dn)}</button>`).join('');
   tabsEl.querySelectorAll('.dom-tab').forEach((b) => b.addEventListener('click', () => {
     studentDomain = b.dataset.dom;
-    renderPractice(lastPractice);
+    renderPractice(lastPractice, lastDomainOrder, lastTopicOrder);
   }));
 
   cont.innerHTML = sel === '__all'
     ? domNames.map((dn) => {
         const g = domGroups[dn];
         const solved = g.filter((x) => x.completed).length;
-        return `<div class="stu-domain-head">${esc(dn)} <span class="hint">· ${solved}/${g.length} solved</span></div>${topicBlocks(g)}`;
+        const collapsed = collapsedDomains.has(dn);
+        return `<div class="stu-domain-head" data-dom="${esc(dn)}" style="cursor:pointer">${collapsed ? '▸' : '▾'} ${esc(dn)} <span class="hint">· ${solved}/${g.length} solved</span></div>${collapsed ? '' : topicBlocks(g)}`;
       }).join('')
     : topicBlocks(domGroups[sel]);
+
+  cont.querySelectorAll('.stu-domain-head[data-dom]').forEach((el) => el.addEventListener('click', () => {
+    const dn = el.dataset.dom;
+    collapsedDomains.has(dn) ? collapsedDomains.delete(dn) : collapsedDomains.add(dn);
+    renderPractice(lastPractice, lastDomainOrder, lastTopicOrder);
+  }));
+  wireTopicFold();
 }
 
 // ---- helpers ----------------------------------------------------------------

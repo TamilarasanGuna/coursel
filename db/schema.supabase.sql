@@ -90,6 +90,14 @@ create table if not exists practice_completions (
   primary key (student_id, problem_id)
 );
 
+create table if not exists practice_order (
+  college_id bigint not null references colleges(id) on delete cascade,
+  kind       text not null,
+  name       text not null,
+  position   integer not null,
+  primary key (college_id, kind, name)
+);
+
 create index if not exists idx_students_college on students(college_id);
 create index if not exists idx_problems_college on practice_problems(college_id);
 create index if not exists idx_snapshots_student on stat_snapshots(student_id);

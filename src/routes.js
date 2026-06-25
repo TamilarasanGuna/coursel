@@ -39,7 +39,7 @@ function isPublicReq(req) {
   if (m === 'GET' && /^\/colleges\/\d+\/options$/.test(p)) return true;    // student register dropdowns
   if (m === 'POST' && (p === '/student/login' || p === '/student/register')) return true;
   if (m === 'GET' && /^\/student\/\d+\/dashboard$/.test(p)) return true;
-  if (m === 'GET' && /^\/view\/[^/]+(\/student\/\d+)?$/.test(p)) return true; // shared read-only link
+  if (m === 'GET' && /^\/view\/[^/]+(\/student\/\d+|\/practice-completers)?$/.test(p)) return true; // shared read-only link
   return false;
 }
 
@@ -178,6 +178,9 @@ router.get('/view/:token', h(async (req, res) => {
       practiceTotal: problems.length,
     })),
     studentCount: collegeStudentCount,
+    domainOrder: await store.listDomains(c.id),
+    topicOrder: await store.listTopics(c.id),
+    completionDist: await store.getPracticeDistribution(c.id),
     practice: problems.map((p) => ({
       title: p.title,
       url: p.url,
@@ -187,6 +190,15 @@ router.get('/view/:token', h(async (req, res) => {
       completedCount: problemCounts[p.id] || 0,
     })),
   });
+}));
+
+// Read-only drill-down: students who completed exactly N problems (token-scoped).
+router.get('/view/:token/practice-completers', h(async (req, res) => {
+  const c = await store.getCollegeByToken(req.params.token);
+  if (!c) return res.status(404).json({ error: 'Invalid or expired link.' });
+  const count = Math.max(0, Number(req.query.count) || 0);
+  const students = await store.getStudentsByCompletedCount(c.id, count);
+  res.json({ count, students: students.map((s) => omitEmail(s)) });
 }));
 
 // Read-only individual student detail, scoped to the share token's college.
@@ -330,6 +342,8 @@ router.get('/student/:studentId/dashboard', h(async (req, res) => {
     },
     monthlyActivity: await store.getMonthlyActivity(student.id),
     monthlySolvedGrowth: await store.getMonthlySolvedGrowth(student.id),
+    domainOrder: await store.listDomains(student.college_id),
+    topicOrder: await store.listTopics(student.college_id),
     practice: problems.map((p) => ({
       id: p.id,
       title: p.title,
@@ -477,11 +491,31 @@ router.get('/colleges/:id/practice', h(async (req, res) => {
     studentCount,
     topics: await store.listTopics(collegeId),
     domains: await store.listDomains(collegeId),
+    completionDist: await store.getPracticeDistribution(collegeId),
     problems: problems.map((p) => ({
       ...p,
       completedCount: problemCounts[p.id] || 0,
     })),
   });
+}));
+
+// Drill-down: students who completed exactly N assigned problems.
+router.get('/colleges/:id/practice-completers', h(async (req, res) => {
+  const collegeId = Number(req.params.id);
+  const count = Math.max(0, Number(req.query.count) || 0);
+  const students = await store.getStudentsByCompletedCount(collegeId, count);
+  res.json({ count, students: students.map((s) => omitEmail(s)) });
+}));
+
+// Save a custom order for domains or topics (admin drag-to-reorder).
+router.post('/colleges/:id/practice-order', h(async (req, res) => {
+  const collegeId = Number(req.params.id);
+  const kind = req.body?.kind;
+  const names = req.body?.names;
+  if (!['domain', 'topic'].includes(kind) || !Array.isArray(names))
+    return res.status(400).json({ error: 'kind (domain|topic) and names[] are required.' });
+  await store.setPracticeOrder(collegeId, kind, names.map((n) => String(n)));
+  res.json({ ok: true });
 }));
 
 // Add practice problems. Accepts either:

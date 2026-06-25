@@ -2,6 +2,9 @@ const $ = (s) => document.querySelector(s);
 const token = decodeURIComponent(location.pathname.split('/view/')[1] || '').replace(/\/+$/, '');
 
 let chart = null, drawerChart = null, lastMonthlySig = null, filtersLoaded = false;
+let lastData = null, viewPracticeDomain = '__all';
+const collapsedDomains = new Set(); // folded domains in the practice list
+const collapsedTopics = new Set(); // folded topics (keyed by domain|topic)
 const dash = { batch: '', department: '', campus: '', q: '', page: 1, pageSize: 100, total: 0 };
 
 function lcChartColors() {
@@ -73,6 +76,7 @@ async function load(opts = {}) {
 }
 
 function render(d, opts) {
+  lastData = d;
   document.title = `${d.college.name} — Progress`;
   $('#collegeName').textContent = d.college.name;
   $('#error').style.display = 'none';
@@ -156,6 +160,11 @@ function practiceCell(s) {
 }
 
 function renderStudents(students) {
+  const sig = JSON.stringify(students.map((s) => [s.id, s.classRank, s.name, s.username, s.section,
+    s.department, s.found, s.ranking, s.baseline_ranking, s.solved_easy, s.solved_medium, s.solved_hard,
+    s.solved_total, s.baseline_total, s.practiceCompleted, s.practiceTotal]));
+  if (sig === renderStudents._sig) return; // skip rebuild when unchanged
+  renderStudents._sig = sig;
   const tbody = $('#studentTable').querySelector('tbody');
   if (!students.length) {
     tbody.innerHTML = '<tr><td colspan="6" class="empty">No students match.</td></tr>';
@@ -183,14 +192,30 @@ function renderStudents(students) {
 }
 
 function renderPractice(d) {
+  const sig = JSON.stringify([d.studentCount, d.domainOrder, d.topicOrder, viewPracticeDomain,
+    [...collapsedDomains], [...collapsedTopics], d.practice.map((p) => [p.id, p.title, p.difficulty, p.topic, p.domain, p.completedCount])]);
+  if (sig === renderPractice._sig) return; // skip rebuild when unchanged
+  renderPractice._sig = sig;
+  renderViewDist(d);
   const tbody = $('#practiceTable').querySelector('tbody');
+  const tabsEl = $('#practiceDomainTabs');
   if (!d.practice.length) {
+    tabsEl.innerHTML = '';
     tbody.innerHTML = '<tr><td colspan="4" class="empty">No practice problems assigned.</td></tr>';
     return;
   }
   const dom = (p) => (p.domain && p.domain.trim()) || 'Uncategorized';
   const top = (p) => (p.topic && p.topic.trim()) || 'Uncategorized';
-  const sortG = (a, b) => (a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b));
+  const mkCmp = (arr) => {
+    const idx = new Map((arr || []).map((n, i) => [n, i]));
+    return (a, b) => {
+      if (a === 'Uncategorized') return 1;
+      if (b === 'Uncategorized') return -1;
+      const ia = idx.has(a) ? idx.get(a) : 1e9, ib = idx.has(b) ? idx.get(b) : 1e9;
+      return ia - ib || a.localeCompare(b);
+    };
+  };
+  const domCmp = mkCmp(d.domainOrder), topCmp = mkCmp(d.topicOrder);
   const row = (p) => {
     const pct = d.studentCount ? Math.round((p.completedCount / d.studentCount) * 100) : 0;
     return `<tr>
@@ -202,19 +227,56 @@ function renderPractice(d) {
   const topicRows = (probs) => {
     const groups = {};
     for (const p of probs) (groups[top(p)] ||= []).push(p);
-    return Object.keys(groups).sort(sortG).map((t) =>
-      `<tr><td colspan="4" style="background:var(--panel-2);font-weight:600;padding-left:18px">${esc(t)} <span style="color:var(--muted);font-weight:400">· ${groups[t].length}</span></td></tr>`
-      + groups[t].map(row).join('')).join('');
+    return Object.keys(groups).sort(topCmp).map((t) => {
+      const g = groups[t];
+      const key = dom(g[0]) + '|' + t;
+      const collapsed = collapsedTopics.has(key);
+      const head = `<tr class="topic-foldrow" data-topic="${esc(key)}"><td colspan="4" style="background:var(--panel-2);font-weight:600;padding-left:18px;cursor:pointer">${collapsed ? '▸' : '▾'} ${esc(t)} <span style="color:var(--muted);font-weight:400">· ${g.length}</span></td></tr>`;
+      return head + (collapsed ? '' : g.map(row).join(''));
+    }).join('');
   };
+  const wireTopicFold = () => tbody.querySelectorAll('.topic-foldrow').forEach((r) => r.addEventListener('click', () => {
+    const k = r.dataset.topic;
+    collapsedTopics.has(k) ? collapsedTopics.delete(k) : collapsedTopics.add(k);
+    if (lastData) renderPractice(lastData);
+  }));
   const domGroups = {};
   for (const p of d.practice) (domGroups[dom(p)] ||= []).push(p);
-  const domNames = Object.keys(domGroups).sort(sortG);
-  const noDomains = domNames.length === 1 && domNames[0] === 'Uncategorized';
-  tbody.innerHTML = noDomains
-    ? topicRows(d.practice)
-    : domNames.map((dn) =>
-        `<tr><td colspan="4" style="background:var(--accent);color:#1a1300;font-weight:700">${esc(dn)} <span style="font-weight:400">· ${domGroups[dn].length}</span></td></tr>`
-        + topicRows(domGroups[dn])).join('');
+  const domNames = Object.keys(domGroups).sort(domCmp);
+
+  // No domains assigned -> plain topic grouping, no tabs.
+  if (domNames.length === 1 && domNames[0] === 'Uncategorized') {
+    tabsEl.innerHTML = '';
+    tbody.innerHTML = topicRows(d.practice);
+    wireTopicFold();
+    return;
+  }
+
+  // Domain tabs (All + one per domain).
+  if (viewPracticeDomain !== '__all' && !domNames.includes(viewPracticeDomain)) viewPracticeDomain = '__all';
+  const sel = viewPracticeDomain;
+  tabsEl.innerHTML =
+    `<button class="dom-tab ${sel === '__all' ? 'active' : ''}" data-dom="__all">All</button>` +
+    domNames.map((dn) => `<button class="dom-tab ${sel === dn ? 'active' : ''}" data-dom="${esc(dn)}">${esc(dn)}</button>`).join('');
+  tabsEl.querySelectorAll('.dom-tab').forEach((b) => b.addEventListener('click', () => {
+    viewPracticeDomain = b.dataset.dom;
+    if (lastData) renderPractice(lastData);
+  }));
+
+  tbody.innerHTML = sel === '__all'
+    ? domNames.map((dn) => {
+        const collapsed = collapsedDomains.has(dn);
+        const head = `<tr class="dom-foldrow" data-dom="${esc(dn)}"><td colspan="4" style="background:var(--accent);color:#1a1300;font-weight:700;cursor:pointer">${collapsed ? '▸' : '▾'} ${esc(dn)} <span style="font-weight:400">· ${domGroups[dn].length}</span></td></tr>`;
+        return head + (collapsed ? '' : topicRows(domGroups[dn]));
+      }).join('')
+    : topicRows(domGroups[sel]);
+
+  tbody.querySelectorAll('.dom-foldrow').forEach((r) => r.addEventListener('click', () => {
+    const dn = r.dataset.dom;
+    collapsedDomains.has(dn) ? collapsedDomains.delete(dn) : collapsedDomains.add(dn);
+    if (lastData) renderPractice(lastData);
+  }));
+  wireTopicFold();
 }
 
 // ---- read-only student drawer ----------------------------------------------
@@ -278,6 +340,78 @@ function progressBlock(s) {
       ${r('Total', s.baseline_total, s.solved_total)}
     </tbody></table>`;
 }
+// ---- Completion breakdown (read-only, paginated 10/page) -------------------
+let viewDistPage = 1;
+const VIEW_DIST_PER_PAGE = 10;
+function renderViewDist(d) {
+  const el = $('#completionDist');
+  if (!el) return;
+  const total = (d.practice || []).length;
+  if (!d.studentCount) {
+    el.innerHTML = '<p class="hint" style="margin:0">No students yet.</p>';
+    return;
+  }
+  // One row per level 0..total so pagination spans every 10 questions.
+  const distMap = new Map((d.completionDist || []).map((x) => [x.completed, x.students]));
+  const dist = [];
+  for (let i = 0; i <= total; i++) dist.push({ completed: i, students: distMap.get(i) || 0 });
+  const pages = Math.max(1, Math.ceil(dist.length / VIEW_DIST_PER_PAGE));
+  viewDistPage = Math.min(Math.max(1, viewDistPage), pages);
+  const start = (viewDistPage - 1) * VIEW_DIST_PER_PAGE;
+  const pageRows = dist.slice(start, start + VIEW_DIST_PER_PAGE);
+  const maxStudents = Math.max(...dist.map((x) => x.students), 1);
+  const rowsHtml = pageRows.map((x) => {
+    const pct = Math.round((x.students / maxStudents) * 100);
+    const all = total && x.completed === total ? ' <span class="dist-all">all</span>' : '';
+    const label = x.completed === 0
+      ? 'Solved 0 questions'
+      : `Solved ${x.completed} question${x.completed > 1 ? 's' : ''}${all}`;
+    const share = Math.round((x.students / d.studentCount) * 100);
+    return `<button class="dist-row" data-count="${x.completed}" title="Click to list these students">
+      <span class="dist-label">${label}</span>
+      <span class="dist-bar"><span style="width:${pct}%"></span></span>
+      <span class="dist-num">${x.students} <span class="hint">(${share}%)</span></span>
+    </button>`;
+  }).join('');
+  const pager = pages > 1 ? `<div class="dist-pager">
+      <button class="btn btn-sm btn-ghost dist-prev" ${viewDistPage === 1 ? 'disabled' : ''}>‹ Prev</button>
+      <span class="hint">${start + 1}–${Math.min(start + VIEW_DIST_PER_PAGE, dist.length)} of ${dist.length}</span>
+      <button class="btn btn-sm btn-ghost dist-next" ${viewDistPage === pages ? 'disabled' : ''}>Next ›</button>
+    </div>` : '';
+  el.innerHTML = rowsHtml + pager;
+  el.querySelectorAll('.dist-row').forEach((b) =>
+    b.addEventListener('click', () => showViewCompleters(Number(b.dataset.count))));
+  const prev = el.querySelector('.dist-prev'), next = el.querySelector('.dist-next');
+  if (prev) prev.addEventListener('click', () => { viewDistPage--; renderViewDist(d); });
+  if (next) next.addEventListener('click', () => { viewDistPage++; renderViewDist(d); });
+}
+
+async function showViewCompleters(count) {
+  $('#drawerContent').innerHTML = '<p class="hint">Loading…</p>';
+  $('#drawer').classList.add('open');
+  $('#drawerBackdrop').classList.add('show');
+  let d;
+  try {
+    d = await api(`/view/${encodeURIComponent(token)}/practice-completers?count=${count}`);
+  } catch (e) {
+    $('#drawerContent').innerHTML = '<p class="empty">Could not load that list.</p>';
+    return;
+  }
+  const list = d.students || [];
+  const head = `<h2 style="margin-top:0">${list.length} student${list.length === 1 ? '' : 's'} solved exactly ${count} question${count === 1 ? '' : 's'}</h2>`;
+  const body = list.length
+    ? `<table class="mini-table"><thead><tr><th>Name</th><th>Username</th><th>Reg no</th><th>Section</th><th>Dept</th></tr></thead><tbody>${
+        list.map((s) => `<tr data-id="${s.id}" style="cursor:pointer">
+          <td>${esc(s.name || '')}</td><td>@${esc(s.username || '')}</td>
+          <td>${esc(s.register_number || '—')}</td><td>${esc(s.section || '—')}</td><td>${esc(s.department || '—')}</td>
+        </tr>`).join('')
+      }</tbody></table>`
+    : '<p class="empty">No students in this bucket.</p>';
+  $('#drawerContent').innerHTML = head + body;
+  $('#drawerContent').querySelectorAll('tr[data-id]').forEach((tr) =>
+    tr.addEventListener('click', () => openStudent(tr.dataset.id)));
+}
+
 function closeDrawer() { $('#drawer').classList.remove('open'); $('#drawerBackdrop').classList.remove('show'); }
 $('#drawerClose').addEventListener('click', closeDrawer);
 $('#drawerBackdrop').addEventListener('click', closeDrawer);
@@ -297,6 +431,14 @@ $('#studentSearch').addEventListener('input', (e) => {
   const v = e.target.value.trim();
   searchTimer = setTimeout(() => { dash.q = v; dash.page = 1; load(); }, 350);
 });
+
+// Dashboard / Practice tab switching.
+document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach((x) => x.classList.remove('active'));
+  t.classList.add('active');
+  $('#tab-' + t.dataset.tab).classList.add('active');
+}));
 
 load();
 setInterval(() => {

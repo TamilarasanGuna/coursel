@@ -325,6 +325,13 @@ function practiceCell(s) {
 function renderStudents(students) {
   const rows = students; // filtering/search now handled server-side
   const tbody = $('#studentTable').querySelector('tbody');
+  // Skip the DOM rebuild when nothing changed (avoids flicker on the 2s refresh).
+  const sig = JSON.stringify(rows.map((s) => [s.id, s.classRank, s.name, s.username, s.section, s.department,
+    s.ranking, s.baseline_ranking, s.solved_easy, s.solved_medium, s.solved_hard, s.solved_total,
+    s.baseline_easy, s.baseline_medium, s.baseline_hard, s.baseline_total, s.practiceCompleted, s.practiceTotal,
+    s.sync_status, s.last_synced_at]));
+  if (sig === state.studentsSig) return;
+  state.studentsSig = sig;
   if (!rows.length) {
     tbody.innerHTML = '<tr><td colspan="8" class="empty">No students match.</td></tr>';
     return;
@@ -482,25 +489,61 @@ $('#practiceCollege').addEventListener('change', (e) => {
 const domName = (p) => (p.domain && p.domain.trim()) || 'Uncategorized';
 const topName = (p) => (p.topic && p.topic.trim()) || 'Uncategorized';
 const sortGroups = (a, b) => (a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b));
+const collapsedDomains = new Set(); // domains folded in the practice list
+const collapsedTopics = new Set(); // topics folded (keyed by domain|topic)
 
+let practiceAbort = null;
 async function loadPractice() {
   const cid = practiceCid();
   if (!cid) return;
-  const d = await api(`/colleges/${cid}/practice`);
+  practiceAbort?.abort();
+  const ctrl = new AbortController();
+  practiceAbort = ctrl;
+  let d;
+  try {
+    d = await api(`/colleges/${cid}/practice`, { signal: ctrl.signal });
+  } catch (e) {
+    if (e.name === 'AbortError' || /abort/i.test(e.message || '')) return;
+    throw e;
+  }
+  state.lastPractice = d;
+  renderPracticeData(d);
+}
 
-  // picker options
-  $('#topicList').innerHTML = (d.topics || []).map((t) => `<option value="${esc(t)}">`).join('');
-  $('#domainList').innerHTML = (d.domains || []).map((t) => `<option value="${esc(t)}">`).join('');
+// Render the practice tab from cached data — used by loadPractice and by
+// instant (no-fetch) domain-tab / fold clicks.
+function renderPracticeData(d) {
+  // Skip the rebuild when nothing relevant changed (no flicker on auto-refresh).
+  const sig = JSON.stringify([
+    d.studentCount, d.domains, d.topics, state.practiceDomain, [...collapsedDomains], [...collapsedTopics],
+    d.problems.map((p) => [p.id, p.title, p.difficulty, p.topic, p.domain, p.completedCount]),
+  ]);
+  if (sig === state.practiceSig) return;
+  state.practiceSig = sig;
 
+  renderCompletionDist(d);
   const tbody = $('#practiceTable').querySelector('tbody');
   if (!d.problems.length) {
     $('#domainTabs').innerHTML = '';
     tbody.innerHTML = '<tr><td colspan="5" class="empty">No practice problems assigned yet.</td></tr>';
     return;
   }
+  $('#topicList').innerHTML = (d.topics || []).map((t) => `<option value="${esc(t)}">`).join('');
+  $('#domainList').innerHTML = (d.domains || []).map((t) => `<option value="${esc(t)}">`).join('');
 
-  // domain tabs: All + each domain present
-  const domainSet = [...new Set(d.problems.map(domName))].sort(sortGroups);
+  // topic comparator honouring the saved order
+  const torder = new Map((d.topics || []).map((n, i) => [n, i]));
+  const tcmp = (a, b) => {
+    if (a === 'Uncategorized') return 1;
+    if (b === 'Uncategorized') return -1;
+    const ia = torder.has(a) ? torder.get(a) : 1e9, ib = torder.has(b) ? torder.get(b) : 1e9;
+    return ia - ib || a.localeCompare(b);
+  };
+
+  // domain tabs in saved order (+ Uncategorized last)
+  const present = new Set(d.problems.map(domName));
+  const domainSet = [...(d.domains || []).filter((n) => present.has(n))];
+  if (present.has('Uncategorized')) domainSet.push('Uncategorized');
   if (state.practiceDomain && state.practiceDomain !== '__all' && !domainSet.includes(state.practiceDomain)) {
     state.practiceDomain = '__all';
   }
@@ -510,7 +553,7 @@ async function loadPractice() {
     domainSet.map((dn) => `<button class="dom-tab ${sel === dn ? 'active' : ''}" data-dom="${esc(dn)}">${esc(dn)}</button>`).join('');
   $('#domainTabs').querySelectorAll('.dom-tab').forEach((b) => b.addEventListener('click', () => {
     state.practiceDomain = b.dataset.dom;
-    loadPractice();
+    renderPracticeData(state.lastPractice); // instant, no refetch
   }));
 
   const rowHtml = (p) => {
@@ -523,34 +566,226 @@ async function loadPractice() {
       <td><button class="btn btn-sm btn-danger del-prob" data-id="${p.id}">Delete</button></td>
     </tr>`;
   };
-  // topic sub-group within a set of problems
+  // topic sub-group within a set of problems (foldable)
   const byTopic = (probs) => {
     const groups = {};
     for (const p of probs) (groups[topName(p)] ||= []).push(p);
-    return Object.keys(groups).sort(sortGroups).map((t) =>
-      `<tr><td colspan="5" style="background:var(--panel-2);font-weight:600;padding-left:18px">${esc(t)} <span style="color:var(--muted);font-weight:400">· ${groups[t].length}</span></td></tr>`
-      + groups[t].map(rowHtml).join('')).join('');
+    return Object.keys(groups).sort(tcmp).map((t) => {
+      const g = groups[t];
+      const key = domName(g[0]) + '|' + t;
+      const collapsed = collapsedTopics.has(key);
+      const head = `<tr class="topic-foldrow" data-topic="${esc(key)}"><td colspan="5" style="background:var(--panel-2);font-weight:600;padding-left:18px;cursor:pointer">${collapsed ? '▸' : '▾'} ${esc(t)} <span style="color:var(--muted);font-weight:400">· ${g.length}</span></td></tr>`;
+      return head + (collapsed ? '' : g.map(rowHtml).join(''));
+    }).join('');
   };
 
   let html = '';
   if (sel === '__all') {
-    // group by domain (header), then topic
+    // group by domain (foldable header), then topic
     const domGroups = {};
     for (const p of d.problems) (domGroups[domName(p)] ||= []).push(p);
-    html = domainSet.map((dn) =>
-      `<tr><td colspan="5" style="background:var(--accent);color:#1a1300;font-weight:700">${esc(dn)} <span style="font-weight:400">· ${domGroups[dn].length}</span></td></tr>`
-      + byTopic(domGroups[dn])).join('');
+    html = domainSet.map((dn) => {
+      const collapsed = collapsedDomains.has(dn);
+      const head = `<tr class="dom-foldrow" data-dom="${esc(dn)}"><td colspan="5" style="background:var(--accent);color:#1a1300;font-weight:700;cursor:pointer">${collapsed ? '▸' : '▾'} ${esc(dn)} <span style="font-weight:400">· ${domGroups[dn].length}</span></td></tr>`;
+      return head + (collapsed ? '' : byTopic(domGroups[dn]));
+    }).join('');
   } else {
     html = byTopic(d.problems.filter((p) => domName(p) === sel));
   }
   tbody.innerHTML = html;
 
-  tbody.querySelectorAll('.del-prob').forEach((b) => b.addEventListener('click', async () => {
+  tbody.querySelectorAll('.dom-foldrow').forEach((r) => r.addEventListener('click', () => {
+    const dn = r.dataset.dom;
+    collapsedDomains.has(dn) ? collapsedDomains.delete(dn) : collapsedDomains.add(dn);
+    renderPracticeData(state.lastPractice); // instant, no refetch
+  }));
+  tbody.querySelectorAll('.topic-foldrow').forEach((r) => r.addEventListener('click', () => {
+    const k = r.dataset.topic;
+    collapsedTopics.has(k) ? collapsedTopics.delete(k) : collapsedTopics.add(k);
+    renderPracticeData(state.lastPractice); // instant, no refetch
+  }));
+  tbody.querySelectorAll('.del-prob').forEach((b) => b.addEventListener('click', async (e) => {
+    e.stopPropagation();
     if (!confirm('Remove this practice problem?')) return;
     await api(`/practice/${b.dataset.id}`, { method: 'DELETE' });
     loadPractice();
   }));
 }
+
+// ---- Completion breakdown (how many students solved how many questions) -----
+let distPage = 1;
+const DIST_PER_PAGE = 10;
+function renderCompletionDist(d) {
+  const el = $('#completionDist');
+  if (!el) return;
+  const total = d.problems.length;
+  if (!d.studentCount) {
+    el.innerHTML = '<p class="hint" style="margin:0">No students in this college yet.</p>';
+    return;
+  }
+  // One row per level 0..total (fill empty levels with 0 students) so pagination
+  // spans every 10 questions, not just the levels that happen to have students.
+  const distMap = new Map((d.completionDist || []).map((x) => [x.completed, x.students]));
+  const dist = [];
+  for (let i = 0; i <= total; i++) dist.push({ completed: i, students: distMap.get(i) || 0 });
+  const pages = Math.max(1, Math.ceil(dist.length / DIST_PER_PAGE));
+  distPage = Math.min(Math.max(1, distPage), pages);
+  const start = (distPage - 1) * DIST_PER_PAGE;
+  const pageRows = dist.slice(start, start + DIST_PER_PAGE);
+  const maxStudents = Math.max(...dist.map((x) => x.students), 1);
+  const rowsHtml = pageRows.map((x) => {
+    const pct = Math.round((x.students / maxStudents) * 100);
+    const all = total && x.completed === total ? ' <span class="dist-all">all</span>' : '';
+    const label = x.completed === 0
+      ? 'Solved 0 questions'
+      : `Solved ${x.completed} question${x.completed > 1 ? 's' : ''}${all}`;
+    const shareOfCohort = Math.round((x.students / d.studentCount) * 100);
+    return `<button class="dist-row" data-count="${x.completed}" title="Click to list these students">
+      <span class="dist-label">${label}</span>
+      <span class="dist-bar"><span style="width:${pct}%"></span></span>
+      <span class="dist-num">${x.students} <span class="hint">(${shareOfCohort}%)</span></span>
+    </button>`;
+  }).join('');
+  const pager = pages > 1 ? `<div class="dist-pager">
+      <button class="btn btn-sm btn-ghost dist-prev" ${distPage === 1 ? 'disabled' : ''}>‹ Prev</button>
+      <span class="hint">${start + 1}–${Math.min(start + DIST_PER_PAGE, dist.length)} of ${dist.length}</span>
+      <button class="btn btn-sm btn-ghost dist-next" ${distPage === pages ? 'disabled' : ''}>Next ›</button>
+    </div>` : '';
+  el.innerHTML = rowsHtml + pager;
+  el.querySelectorAll('.dist-row').forEach((b) =>
+    b.addEventListener('click', () => showCompleters(Number(b.dataset.count))));
+  const prev = el.querySelector('.dist-prev'), next = el.querySelector('.dist-next');
+  if (prev) prev.addEventListener('click', () => { distPage--; renderCompletionDist(d); });
+  if (next) next.addEventListener('click', () => { distPage++; renderCompletionDist(d); });
+}
+
+async function showCompleters(count) {
+  const cid = practiceCid();
+  if (!cid) return;
+  $('#drawerContent').innerHTML = '<p class="hint">Loading…</p>';
+  openDrawer();
+  let d;
+  try {
+    d = await api(`/colleges/${cid}/practice-completers?count=${count}`);
+  } catch (e) {
+    $('#drawerContent').innerHTML = '<p class="empty">Could not load that list.</p>';
+    return;
+  }
+  const list = d.students || [];
+  const head = `<h2 style="margin-top:0">${list.length} student${list.length === 1 ? '' : 's'} solved exactly ${count} question${count === 1 ? '' : 's'}</h2>`;
+  const body = list.length
+    ? `<table class="mini-table"><thead><tr><th>Name</th><th>Username</th><th>Reg no</th><th>Section</th><th>Dept</th></tr></thead><tbody>${
+        list.map((s) => `<tr data-id="${s.id}" style="cursor:pointer">
+          <td>${esc(s.name || '')}</td><td>@${esc(s.username || '')}</td>
+          <td>${esc(s.register_number || '—')}</td><td>${esc(s.section || '—')}</td><td>${esc(s.department || '—')}</td>
+        </tr>`).join('')
+      }</tbody></table>`
+    : '<p class="empty">No students in this bucket.</p>';
+  $('#drawerContent').innerHTML = head + body;
+  $('#drawerContent').querySelectorAll('tr[data-id]').forEach((tr) =>
+    tr.addEventListener('click', () => openStudent(tr.dataset.id)));
+}
+
+// ---- Reorder domains / topics (drag & drop) --------------------------------
+let sortInstances = [];
+function openReorderPanel() {
+  const d = state.lastPractice;
+  const fill = (sel, names) => {
+    $(sel).innerHTML = (names && names.length)
+      ? names.map((n) => `<div class="sort-item" data-name="${esc(n)}">⠿ ${esc(n)}</div>`).join('')
+      : '<div class="hint">None yet</div>';
+  };
+  fill('#domainOrderList', d && d.domains);
+  fill('#topicOrderList', d && d.topics);
+  sortInstances.forEach((s) => s.destroy());
+  sortInstances = [];
+  if (window.Sortable) {
+    sortInstances.push(Sortable.create($('#domainOrderList'), { animation: 150, ghostClass: 'sortable-ghost', onEnd: () => saveOrder('domain', '#domainOrderList') }));
+    sortInstances.push(Sortable.create($('#topicOrderList'), { animation: 150, ghostClass: 'sortable-ghost', onEnd: () => saveOrder('topic', '#topicOrderList') }));
+  }
+}
+async function saveOrder(kind, sel) {
+  const names = [...$(sel).querySelectorAll('.sort-item')].map((el) => el.dataset.name);
+  if (!names.length) return;
+  try {
+    await api(`/colleges/${practiceCid()}/practice-order`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, names }),
+    });
+    loadPractice(); // refresh tabs/table in the new order
+  } catch (e) { alert(e.message); }
+}
+$('#reorderToggle').addEventListener('click', () => {
+  const p = $('#reorderPanel');
+  const show = p.style.display === 'none';
+  p.style.display = show ? 'block' : 'none';
+  if (show) openReorderPanel();
+});
+
+// ---- Custom domain/topic dropdown (stays open until you pick or click away) -
+const comboPop = document.createElement('div');
+comboPop.className = 'combo-pop';
+comboPop.style.display = 'none';
+document.body.appendChild(comboPop);
+let comboInput = null;
+
+function renderCombo(options, filter) {
+  const f = (filter || '').toLowerCase();
+  const opts = (options || []).filter((o) => o.toLowerCase().includes(f));
+  comboPop.innerHTML = opts.length
+    ? opts.map((o) => `<div class="combo-item">${esc(o)}</div>`).join('')
+    : '<div class="combo-empty">No matches — type to add a new one</div>';
+}
+function openCombo(input, options) {
+  comboInput = input;
+  const r = input.getBoundingClientRect();
+  comboPop.style.left = r.left + 'px';
+  comboPop.style.top = (r.bottom + 3) + 'px';
+  comboPop.style.minWidth = r.width + 'px';
+  renderCombo(options, input.value);
+  comboPop.style.display = 'block';
+}
+function closeCombo() { comboPop.style.display = 'none'; comboInput = null; }
+
+comboPop.addEventListener('mousedown', (e) => {
+  const it = e.target.closest('.combo-item');
+  if (it && comboInput) {
+    e.preventDefault(); // stop the input from blurring/closing first
+    comboInput.value = it.textContent;
+    comboInput.dispatchEvent(new Event('input', { bubbles: true }));
+    closeCombo();
+  }
+});
+document.addEventListener('click', (e) => {
+  if (comboInput && e.target !== comboInput && !comboPop.contains(e.target)) closeCombo();
+});
+window.addEventListener('resize', closeCombo);
+
+function attachCombo(sel, getOptions) {
+  const input = $(sel);
+  if (!input) return;
+  input.removeAttribute('list'); // replace native datalist with our dropdown
+  const open = () => openCombo(input, getOptions());
+  input.addEventListener('focus', open);
+  input.addEventListener('click', open);
+  input.addEventListener('input', () => { if (comboInput === input) renderCombo(getOptions(), input.value); });
+}
+const domainOpts = () => (state.lastPractice && state.lastPractice.domains) || [];
+// Topics under the currently-selected domain only (all topics if no domain chosen).
+function topicsForDomain(domainVal) {
+  const d = (domainVal || '').trim();
+  const allTopics = (state.lastPractice && state.lastPractice.topics) || [];
+  if (!d) return allTopics;
+  const probs = (state.lastPractice && state.lastPractice.problems) || [];
+  const under = new Set();
+  for (const p of probs) {
+    if (((p.domain && p.domain.trim()) || '') === d && p.topic && p.topic.trim()) under.add(p.topic.trim());
+  }
+  return allTopics.filter((t) => under.has(t));
+}
+attachCombo('#singleDomain', domainOpts);
+attachCombo('#singleTopic', () => topicsForDomain($('#singleDomain').value));
+attachCombo('#practiceDomain', domainOpts);
+attachCombo('#practiceTopic', () => topicsForDomain($('#practiceDomain').value));
 
 // Add a single question (own link + topic + difficulty).
 $('#addSingleBtn').addEventListener('click', async () => {
@@ -566,7 +801,7 @@ $('#addSingleBtn').addEventListener('click', async () => {
       body: JSON.stringify({ links: link, topic, domain, difficulty }),
     });
     if (r.added) {
-      setMsg('#singleMsg', `Added.`, 'ok');
+      setMsg('#singleMsg', `Added.`, 'ok', 5000);
       $('#singleLink').value = ''; // keep topic + difficulty for the next one
     } else {
       setMsg('#singleMsg', 'That link could not be parsed.', 'err');
@@ -586,7 +821,7 @@ $('#addPracticeBtn').addEventListener('click', async () => {
     const r = await api(`/colleges/${practiceCid()}/practice`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ links, topic, domain, difficulty }),
     });
-    setMsg('#practiceMsg', `Added ${r.added} problem(s)${topic ? ' under “' + topic + '”' : ''}.` + (r.skipped.length ? ` Skipped ${r.skipped.length}.` : ''), 'ok');
+    setMsg('#practiceMsg', `Added ${r.added} problem(s)${topic ? ' under “' + topic + '”' : ''}.` + (r.skipped.length ? ` Skipped ${r.skipped.length}.` : ''), 'ok', 5000);
     $('#practiceLinks').value = '';
     loadPractice();
   } catch (e) { setMsg('#practiceMsg', e.message, 'err'); }
@@ -605,7 +840,7 @@ $('#practiceFile').addEventListener('change', async (e) => {
   if (difficulty) fd.append('difficulty', difficulty);
   try {
     const r = await api(`/colleges/${practiceCid()}/practice`, { method: 'POST', body: fd });
-    setMsg('#practiceMsg', `Added ${r.added} problem(s) from file.`, 'ok');
+    setMsg('#practiceMsg', `Added ${r.added} problem(s) from file.`, 'ok', 5000);
     loadPractice();
   } catch (err) { setMsg('#practiceMsg', err.message, 'err'); }
   e.target.value = '';
@@ -660,7 +895,13 @@ function pollSync() {
 }
 
 // ---- helpers ----------------------------------------------------------------
-function setMsg(sel, text, cls) { const el = $(sel); el.textContent = text; el.className = 'msg ' + (cls || ''); }
+function setMsg(sel, text, cls, autoMs) {
+  const el = $(sel);
+  el.textContent = text;
+  el.className = 'msg ' + (cls || '');
+  if (el._clearTimer) clearTimeout(el._clearTimer);
+  if (autoMs) el._clearTimer = setTimeout(() => { el.textContent = ''; el.className = 'msg'; }, autoMs);
+}
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 // Progress since first tracked. `gain` for solved counts (up is good),

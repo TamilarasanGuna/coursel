@@ -7,6 +7,7 @@
   <script>try{document.documentElement.setAttribute('data-theme',localStorage.getItem('lc_theme')||'dark')}catch(e){}</script>
   <link rel="stylesheet" href="styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.3/Sortable.min.js"></script>
 </head>
 <body>
   <div id="adminLogin" class="admin-login">
@@ -111,8 +112,8 @@
         <p class="hint" style="margin:0 0 8px">Hierarchy: <b>Domain</b> → <b>Topic</b> → Question (e.g. Fundamentals of Programming → Array → Missing Number).</p>
         <div class="row" style="margin-top:0">
           <input id="singleLink" class="search" placeholder="LeetCode link or slug" style="flex:2;min-width:180px" />
-          <input id="singleDomain" class="search" list="domainList" placeholder="Domain" style="flex:1;min-width:120px" />
-          <input id="singleTopic" class="search" list="topicList" placeholder="Topic" style="flex:1;min-width:110px" />
+          <input id="singleDomain" class="search" autocomplete="off" placeholder="Domain" style="flex:1;min-width:120px" />
+          <input id="singleTopic" class="search" autocomplete="off" placeholder="Topic" style="flex:1;min-width:110px" />
           <select id="singleDifficulty" style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 10px">
             <option value="">Difficulty…</option>
             <option>Easy</option><option>Medium</option><option>Hard</option>
@@ -124,14 +125,14 @@
         <h2 style="font-size:13px;margin:22px 0 8px">Add many at once</h2>
         <p class="hint">Pick or type a <b>topic</b> and a <b>difficulty</b>, then paste LeetCode links (one per line) — all added under that topic and difficulty. Or upload an Excel file with <code>URL</code> (and optionally <code>Topic</code>, <code>Difficulty</code>) columns, which override these.</p>
         <div class="row" style="margin-top:0">
-          <input id="practiceDomain" class="search" list="domainList" placeholder="Domain" style="flex:1;min-width:140px" />
-          <input id="practiceTopic" class="search" list="topicList" placeholder="Topic (e.g. Array)" style="flex:1;min-width:140px" />
+          <input id="practiceDomain" class="search" autocomplete="off" placeholder="Domain" style="flex:1;min-width:140px" />
+          <input id="practiceTopic" class="search" autocomplete="off" placeholder="Topic (e.g. Array)" style="flex:1;min-width:140px" />
           <select id="practiceDifficulty" style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 10px">
             <option value="">Difficulty (optional)…</option>
             <option>Easy</option><option>Medium</option><option>Hard</option>
           </select>
         </div>
-        <textarea id="practiceLinks" rows="4" placeholder="https://leetcode.com/problems/two-sum/&#10;https://leetcode.com/problems/valid-parentheses/"></textarea>
+        <textarea id="practiceLinks" rows="4" style="margin-top:12px" placeholder="https://leetcode.com/problems/two-sum/&#10;https://leetcode.com/problems/valid-parentheses/"></textarea>
         <div class="row">
           <button id="addPracticeBtn" class="btn btn-primary">Add problems</button>
           <label class="btn btn-ghost file-btn">⬆ Upload Excel<input type="file" id="practiceFile" accept=".xlsx,.xls,.csv" hidden /></label>
@@ -140,7 +141,24 @@
         </div>
       </div>
       <div class="panel">
-        <h2>Assigned problems &amp; completion</h2>
+        <div class="panel-head" style="flex-wrap:wrap;gap:8px">
+          <h2>Completion breakdown</h2>
+          <span class="hint">How many students have solved how many of the assigned questions. Click a row to see who.</span>
+        </div>
+        <div id="completionDist" class="dist-list"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Assigned problems &amp; completion</h2>
+          <button id="reorderToggle" class="btn btn-sm btn-ghost">⇅ Reorder domains / topics</button>
+        </div>
+        <div id="reorderPanel" style="display:none;margin-bottom:14px">
+          <p class="hint" style="margin-top:0">Drag to reorder — the new order applies to the tabs and to every student/shared view.</p>
+          <div class="reorder-cols">
+            <div><div class="reorder-label">Domains</div><div id="domainOrderList" class="sortlist"></div></div>
+            <div><div class="reorder-label">Topics</div><div id="topicOrderList" class="sortlist"></div></div>
+          </div>
+        </div>
         <div id="domainTabs" class="dom-tabs"></div>
         <div class="table-wrap">
           <table id="practiceTable">

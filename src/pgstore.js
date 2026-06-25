@@ -373,18 +373,43 @@ export async function listPracticeProblems(collegeId) {
 
 export async function listTopics(collegeId) {
   const { rows } = await q(
-    "SELECT DISTINCT topic FROM practice_problems WHERE college_id=$1 AND topic IS NOT NULL AND topic<>'' ORDER BY topic",
+    `SELECT DISTINCT pp.topic AS name, COALESCE(po.position, 1000000) AS pos
+     FROM practice_problems pp
+     LEFT JOIN practice_order po ON po.college_id=pp.college_id AND po.kind='topic' AND po.name=pp.topic
+     WHERE pp.college_id=$1 AND pp.topic IS NOT NULL AND pp.topic<>''
+     ORDER BY pos, name`,
     [collegeId]
   );
-  return rows.map((r) => r.topic);
+  return rows.map((r) => r.name);
 }
 
 export async function listDomains(collegeId) {
   const { rows } = await q(
-    "SELECT DISTINCT domain FROM practice_problems WHERE college_id=$1 AND domain IS NOT NULL AND domain<>'' ORDER BY domain",
+    `SELECT DISTINCT pp.domain AS name, COALESCE(po.position, 1000000) AS pos
+     FROM practice_problems pp
+     LEFT JOIN practice_order po ON po.college_id=pp.college_id AND po.kind='domain' AND po.name=pp.domain
+     WHERE pp.college_id=$1 AND pp.domain IS NOT NULL AND pp.domain<>''
+     ORDER BY pos, name`,
     [collegeId]
   );
-  return rows.map((r) => r.domain);
+  return rows.map((r) => r.name);
+}
+
+export async function setPracticeOrder(collegeId, kind, names) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM practice_order WHERE college_id=$1 AND kind=$2', [collegeId, kind]);
+    for (let i = 0; i < names.length; i++) {
+      await client.query('INSERT INTO practice_order(college_id, kind, name, position) VALUES ($1,$2,$3,$4)', [collegeId, kind, names[i], i]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 export async function getPracticeProblemsByCollege(collegeId) {
@@ -456,6 +481,36 @@ export async function getCompletionsForStudent(studentId) {
     `SELECT problem_id, ${TS('completed_at', 'completed_at')}
      FROM practice_completions WHERE student_id=$1`,
     [studentId]
+  );
+  return rows;
+}
+
+// Distribution: for each "number of assigned problems completed", how many students.
+export async function getPracticeDistribution(collegeId) {
+  const { rows } = await q(
+    `SELECT cnt, COUNT(*)::int AS students FROM (
+       SELECT s.id AS sid, COUNT(pp.id)::int AS cnt
+       FROM students s
+       LEFT JOIN practice_completions pc ON pc.student_id = s.id
+       LEFT JOIN practice_problems pp ON pp.id = pc.problem_id AND pp.college_id = s.college_id
+       WHERE s.college_id = $1
+       GROUP BY s.id
+     ) t GROUP BY cnt ORDER BY cnt`,
+    [collegeId]
+  );
+  return rows.map((r) => ({ completed: r.cnt, students: r.students }));
+}
+
+// The students who completed exactly `count` assigned problems (on-demand drill-down).
+export async function getStudentsByCompletedCount(collegeId, count) {
+  const { rows } = await q(
+    `SELECT s.id, s.name, s.username, s.register_number, s.section, s.department, COUNT(pp.id)::int AS cnt
+     FROM students s
+     LEFT JOIN practice_completions pc ON pc.student_id = s.id
+     LEFT JOIN practice_problems pp ON pp.id = pc.problem_id AND pp.college_id = s.college_id
+     WHERE s.college_id = $1
+     GROUP BY s.id HAVING COUNT(pp.id) = $2 ORDER BY s.name`,
+    [collegeId, count]
   );
   return rows;
 }

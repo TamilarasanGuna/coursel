@@ -26,6 +26,12 @@
   <main>
     <div id="error" class="panel" style="display:none"></div>
     <div id="content" style="display:none">
+      <nav class="tabs">
+        <button class="tab active" data-tab="dashboard">Dashboard</button>
+        <button class="tab" data-tab="practice">Practice</button>
+      </nav>
+
+      <section id="tab-dashboard" class="tab-panel active">
       <div class="cards" id="cards"></div>
 
       <div class="panel">
@@ -57,9 +63,19 @@
           <button id="nextPage" class="btn btn-sm btn-ghost">Next ›</button>
         </div>
       </div>
+      </section>
 
+      <section id="tab-practice" class="tab-panel">
+      <div class="panel">
+        <div class="panel-head" style="flex-wrap:wrap;gap:8px">
+          <h2>Completion breakdown</h2>
+          <span class="hint">How many students have solved how many of the assigned questions. Click a row to see who.</span>
+        </div>
+        <div id="completionDist" class="dist-list"></div>
+      </div>
       <div class="panel">
         <h2>Assigned problems &amp; completion</h2>
+        <div id="practiceDomainTabs" class="dom-tabs"></div>
         <div class="table-wrap">
           <table id="practiceTable">
             <thead><tr><th>Problem</th><th>Difficulty</th><th>Solved by</th><th>Progress</th></tr></thead>
@@ -67,6 +83,7 @@
           </table>
         </div>
       </div>
+      </section>
     </div>
   </main>
 
