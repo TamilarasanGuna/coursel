@@ -149,16 +149,34 @@ export async function listStudents(collegeId) {
   return rows;
 }
 
+const RISK_SQL_PG = "(baseline_at IS NOT NULL AND baseline_at <= now() - interval '7 days' AND (solved_total - COALESCE(baseline_total,0)) <= 0)";
+
+function studentOrderByPg(f) {
+  const dir = f.dir === 'asc' ? 'ASC' : f.dir === 'desc' ? 'DESC' : null;
+  switch (f.sort) {
+    case 'name': return `name ${dir || 'ASC'}`;
+    case 'rank': return `(ranking IS NULL), ranking ${dir || 'ASC'}, name`;
+    case 'practice': return `(SELECT COUNT(*) FROM practice_completions pc WHERE pc.student_id = students.id) ${dir || 'DESC'}, name`;
+    case 'total':
+    default: return `solved_total ${dir || 'DESC'}, name`;
+  }
+}
+
 export async function getStudentsPage(collegeId, f = {}) {
   const { where, params } = studentWhere(collegeId, f);
+  const fullWhere = f.risk ? `${where} AND ${RISK_SQL_PG}` : where;
+  const total = (await q(`SELECT COUNT(*)::int AS c FROM students WHERE ${fullWhere}`, params)).rows[0].c;
+  const all = f.all === true || f.all === '1';
+  const sel = `SELECT ${STUDENT_COLS}, ${RISK_SQL_PG} AS at_risk FROM students WHERE ${fullWhere} ORDER BY ${studentOrderByPg(f)}`;
+  let rows;
+  if (all) {
+    rows = (await q(sel, params)).rows;
+    return { rows, total, offset: 0 };
+  }
   const pageSize = Math.min(500, Math.max(1, f.pageSize || 100));
   const page = Math.max(1, f.page || 1);
   const offset = (page - 1) * pageSize;
-  const total = (await q(`SELECT COUNT(*)::int AS c FROM students WHERE ${where}`, params)).rows[0].c;
-  const rows = (await q(
-    `SELECT ${STUDENT_COLS} FROM students WHERE ${where} ORDER BY solved_total DESC, name LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-    [...params, pageSize, offset]
-  )).rows;
+  rows = (await q(`${sel} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, pageSize, offset])).rows;
   return { rows, total, offset };
 }
 
@@ -198,6 +216,12 @@ export async function getFilterOptions(collegeId) {
 
 export async function getAllStudents() {
   const { rows } = await q(`SELECT ${STUDENT_COLS} FROM students`);
+  return rows;
+}
+// The N students least-recently synced (never-synced first) — for staggered refresh.
+export async function getStaleStudents(limit) {
+  const { rows } = await q(
+    `SELECT ${STUDENT_COLS} FROM students ORDER BY last_synced_at ASC NULLS FIRST LIMIT $1`, [limit]);
   return rows;
 }
 
@@ -357,16 +381,17 @@ export async function getMonthlySolvedGrowth(studentId) {
 
 // ---- Practice helpers -------------------------------------------------------
 
-export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic, domain, video_url }) {
+export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic, domain, video_url, due_date }) {
   const { rows } = await q(
-    `INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic, domain, video_url)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    `INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic, domain, video_url, due_date)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
      ON CONFLICT (college_id, slug) DO UPDATE SET
        title=EXCLUDED.title, url=EXCLUDED.url, difficulty=EXCLUDED.difficulty,
        topic=EXCLUDED.topic, domain=EXCLUDED.domain,
-       video_url=COALESCE(EXCLUDED.video_url, practice_problems.video_url)
+       video_url=COALESCE(EXCLUDED.video_url, practice_problems.video_url),
+       due_date=COALESCE(EXCLUDED.due_date, practice_problems.due_date)
      RETURNING id`,
-    [college_id, title, slug, url, difficulty, topic ?? null, domain ?? null, video_url ?? null]
+    [college_id, title, slug, url, difficulty, topic ?? null, domain ?? null, video_url ?? null, due_date ?? null]
   );
   return rows[0].id;
 }
@@ -377,7 +402,7 @@ export async function setShowVideo(collegeId, show) {
 
 export async function listPracticeProblems(collegeId) {
   const { rows } = await q(
-    `SELECT id, college_id, title, slug, url, difficulty, topic, domain, video_url, ${TS('created_at', 'created_at')}
+    `SELECT id, college_id, title, slug, url, difficulty, topic, domain, video_url, due_date, ${TS('created_at', 'created_at')}
      FROM practice_problems WHERE college_id=$1 ORDER BY domain NULLS FIRST, topic NULLS FIRST, created_at DESC`,
     [collegeId]
   );
@@ -466,6 +491,11 @@ export async function markCompletion(studentId, problemId, solvedTimestamp) {
      VALUES ($1,$2,$3) ON CONFLICT (student_id, problem_id) DO NOTHING`,
     [studentId, problemId, solvedTimestamp ?? null]
   );
+  return r.rowCount > 0;
+}
+
+export async function unmarkCompletion(studentId, problemId) {
+  const r = await q('DELETE FROM practice_completions WHERE student_id=$1 AND problem_id=$2', [studentId, problemId]);
   return r.rowCount > 0;
 }
 

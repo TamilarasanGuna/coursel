@@ -269,7 +269,8 @@ textarea, .search, .field input {
 .dist-pager { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 10px; }
 
 /* Practice video links */
-.vid-link { font-size: 12px; font-weight: 600; color: #ff4d4f; white-space: nowrap; margin-left: 6px; }
+.vid-link { font-size: 12px; font-weight: 600; color: #ff4d4f; white-space: nowrap; margin-left: 6px;
+  background: none; border: none; padding: 0; cursor: pointer; font-family: inherit; }
 .vid-link:hover { text-decoration: underline; }
 .stu-vid { color: #ff4d4f !important; border-color: rgba(255,77,79,.4) !important; }
 
@@ -278,3 +279,39 @@ textarea, .search, .field input {
 .bulk-cols textarea { width: 100%; }
 .bulk-label { display: block; font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 5px; }
 @media (max-width: 700px) { .bulk-cols { grid-template-columns: 1fr; } }
+
+/* At-risk badge + sortable headers + DB driver badge */
+.risk-badge { display:inline-block; font-size:10px; font-weight:700; color:#d4380d; background:rgba(255,77,79,.14);
+  border:1px solid rgba(255,77,79,.4); border-radius:5px; padding:1px 5px; margin-left:6px; vertical-align:middle; }
+#studentTable th.sortable { cursor:pointer; user-select:none; white-space:nowrap; }
+#studentTable th.sortable:hover { color:var(--accent); }
+#studentTable th.sortable::after { content:attr(data-arrow); margin-left:4px; color:var(--accent); font-size:11px; }
+#studentTable th.sorted { color:var(--accent); }
+.db-badge { font-size:11px; padding:1px 7px; border-radius:5px; margin-left:8px; border:1px solid var(--border); }
+.db-badge.ok { color:var(--green); border-color:rgba(44,187,93,.4); }
+.db-badge.warn { color:var(--accent); border-color:rgba(255,161,22,.4); }
+
+/* Deadline pills */
+.due-pill { display:inline-block; font-size:11px; font-weight:600; padding:1px 6px; border-radius:5px; margin-left:6px;
+  background:var(--panel-2); color:var(--muted); border:1px solid var(--border); white-space:nowrap; vertical-align:middle; }
+.due-pill.overdue { color:#d4380d; background:rgba(255,77,79,.14); border-color:rgba(255,77,79,.4); }
+.due-pill.ontime { color:var(--green); background:rgba(44,187,93,.14); border-color:rgba(44,187,93,.4); }
+.due-pill.late { color:#d4380d; background:rgba(255,77,79,.14); border-color:rgba(255,77,79,.4); }
+
+/* Bulk action bar + leaderboard */
+.bulk-bar { display:flex; align-items:center; gap:10px; margin-bottom:10px; padding:8px 12px;
+  background:var(--panel-2); border:1px solid var(--border); border-radius:8px; }
+#studentTable th:first-child, #studentTable td:first-child { width:28px; text-align:center; }
+.lb-row { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--border); }
+.lb-row:last-child { border-bottom:none; }
+.lb-rank { width:26px; text-align:center; font-weight:700; }
+.lb-name { flex:1; font-weight:600; }
+.lb-total { font-variant-numeric:tabular-nums; font-weight:700; color:var(--accent); }
+
+/* Inline YouTube player modal */
+.video-modal { position:fixed; inset:0; background:rgba(0,0,0,.75); display:none; align-items:center; justify-content:center; z-index:1000; padding:20px; }
+.video-modal.open { display:flex; }
+.video-modal-inner { position:relative; width:min(900px,100%); }
+.video-frame { position:relative; width:100%; aspect-ratio:16/9; background:#000; border-radius:10px; overflow:hidden; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+.video-frame iframe { position:absolute; inset:0; width:100%; height:100%; border:0; }
+.video-modal-close { position:absolute; top:-40px; right:0; background:transparent; border:none; color:#fff; font-size:26px; cursor:pointer; line-height:1; }

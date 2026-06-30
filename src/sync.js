@@ -42,15 +42,24 @@ async function syncStudent(student, problemsByCollege) {
 }
 
 // Refresh every student (optionally just one college). Politely paced.
-export async function runSync({ collegeId = null } = {}) {
+export async function runSync({ collegeId = null, batch = null } = {}) {
   if (running) return { skipped: true, reason: 'a sync is already running' };
   running = true;
   const started = Date.now();
   const summary = { students: 0, ok: 0, failed: 0, newCompletions: 0 };
 
   try {
-    const all = await store.getAllStudents();
-    const students = collegeId ? all.filter((s) => s.college_id === collegeId) : all;
+    let students;
+    if (collegeId) {
+      // Manual "sync this college now" — refresh the whole college.
+      students = (await store.getAllStudents()).filter((s) => s.college_id === collegeId);
+    } else if (batch && batch > 0) {
+      // Staggered scheduled run: only the N most-stale students this tick, so the
+      // load on LeetCode is spread evenly and the host IP doesn't get blocked.
+      students = await store.getStaleStudents(batch);
+    } else {
+      students = await store.getAllStudents();
+    }
 
     // Pre-load assigned problems per college once.
     const problemsByCollege = new Map();

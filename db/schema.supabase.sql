@@ -82,6 +82,7 @@ create table if not exists practice_problems (
 alter table practice_problems add column if not exists topic text;
 alter table practice_problems add column if not exists domain text;
 alter table practice_problems add column if not exists video_url text;
+alter table practice_problems add column if not exists due_date text;
 alter table colleges add column if not exists show_video boolean not null default true;
 -- Denormalized college on monthly_activity for fast whole-college chart aggregates.
 alter table monthly_activity add column if not exists college_id bigint;

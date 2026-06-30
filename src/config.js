@@ -15,14 +15,17 @@ export const config = {
   publicDir: path.join(ROOT, 'public'),
 
   // Auto-poll scheduler (cron syntax; 6 fields = supports seconds).
-  // Default: every 30 seconds. The whole roster + all assigned problems are
-  // refreshed each run. Overlapping runs are skipped (see runSync's guard), so
-  // if a pass takes longer than 30s it simply runs back-to-back rather than
-  // piling up. WARNING: against the live LeetCode endpoint this is aggressive
-  // and can get the host IP rate-limited/blocked — raise this for big rosters,
-  // e.g. POLL_CRON="0 */15 * * * *" (every 15 min).
-  pollCron: process.env.POLL_CRON || '*/30 * * * * *',
+  // Each tick syncs only a stale batch of students (see syncBatchSize), so this
+  // can fire often without hammering LeetCode. Overlapping runs are skipped.
+  pollCron: process.env.POLL_CRON || '0 * * * * *', // every minute
   pollOnStartup: process.env.POLL_ON_STARTUP !== 'false', // run one pass when server boots
+
+  // Staggered refresh: each scheduled tick syncs only the N most-stale students
+  // (least-recently-synced first) instead of the whole roster. Spreads load on
+  // LeetCode evenly and avoids IP bans at scale. Per-student refresh interval
+  // ≈ (total students / SYNC_BATCH_SIZE) × cron period. Set 0 to sync everyone
+  // every tick (only safe for small rosters).
+  syncBatchSize: Number(process.env.SYNC_BATCH_SIZE ?? 20),
 
   // Politeness / rate limiting against LeetCode's unofficial GraphQL endpoint.
   // We are a guest on an undocumented API; hammering it gets the host IP blocked.

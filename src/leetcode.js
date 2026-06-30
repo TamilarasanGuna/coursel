@@ -48,10 +48,13 @@ async function gql(query, variables) {
     body: JSON.stringify({ query, variables }),
   });
   if (res.status === 429) {
+    const ra = Number(res.headers.get('retry-after'));
     const e = new Error('LeetCode rate-limited the request (HTTP 429)');
     e.rateLimited = true;
+    e.retryAfterMs = Number.isFinite(ra) && ra > 0 ? ra * 1000 : 0; // honor Retry-After
     throw e;
   }
+  if (res.status >= 500) { const e = new Error(`LeetCode HTTP ${res.status}`); e.transient = true; throw e; }
   if (!res.ok) throw new Error(`LeetCode HTTP ${res.status}`);
   const json = await res.json();
   if (json.errors?.length) {
@@ -60,15 +63,22 @@ async function gql(query, variables) {
   return json.data;
 }
 
+// Exponential backoff with jitter. Honors Retry-After on 429; doesn't waste
+// retries on hard 4xx (those won't succeed on retry).
 async function gqlWithRetry(query, variables) {
+  const base = config.requestDelayMs || 500;
   let lastErr;
   for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
     try {
       return await gql(query, variables);
     } catch (err) {
       lastErr = err;
-      if (err.rateLimited) await sleep(config.requestDelayMs * (attempt + 2));
-      else await sleep(config.requestDelayMs);
+      if (attempt === config.maxRetries) break;
+      const isHard4xx = !err.rateLimited && !err.transient && /HTTP 4\d\d/.test(err.message || '');
+      if (isHard4xx) break; // e.g. 403/404 — retrying won't help
+      let wait = base * Math.pow(2, attempt) + Math.floor(Math.random() * 250); // jitter
+      if (err.rateLimited) wait = Math.max(wait, err.retryAfterMs || base * Math.pow(2, attempt + 1));
+      await sleep(wait);
     }
   }
   throw lastErr;

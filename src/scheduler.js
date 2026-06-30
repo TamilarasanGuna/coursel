@@ -9,20 +9,20 @@ export function startScheduler() {
   }
   cron.schedule(config.pollCron, async () => {
     try {
-      const r = await runSync();
-      // Quiet logging (this can fire every 30s): only log real work or errors.
+      const r = await runSync({ batch: config.syncBatchSize });
+      // Quiet logging (fires often): only log real work or errors.
       if (r && !r.skipped) console.log('[scheduler] auto-poll done:', JSON.stringify(r));
     } catch (e) {
       console.error('[scheduler] auto-poll failed:', e.message);
     }
   });
-  console.log(`[scheduler] auto-poll scheduled: "${config.pollCron}"`);
+  console.log(`[scheduler] auto-poll scheduled: "${config.pollCron}" (batch ${config.syncBatchSize || 'all'})`);
 
   if (config.pollOnStartup) {
     // delay a few seconds so the server is fully up first
     setTimeout(() => {
       console.log('[scheduler] running startup sync...');
-      runSync().then(
+      runSync({ batch: config.syncBatchSize }).then(
         (r) => console.log('[scheduler] startup sync done:', JSON.stringify(r)),
         (e) => console.error('[scheduler] startup sync failed:', e.message)
       );

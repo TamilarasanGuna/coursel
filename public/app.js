@@ -15,7 +15,7 @@ let state = {
   collegeId: null, students: [], monthlyChart: null, practiceCollegeId: null,
   practiceDomain: '__all', // selected domain tab in the Practice section
   // dashboard pagination + filters
-  dash: { batch: '', department: '', campus: '', q: '', page: 1, pageSize: 100, total: 0 },
+  dash: { batch: '', department: '', campus: '', q: '', sort: '', dir: '', risk: false, page: 1, pageSize: 100, total: 0 },
   filtersFor: null, // college id the filter dropdowns were populated for
 };
 
@@ -224,6 +224,7 @@ async function loadDashboard(opts = {}) {
   const dq = state.dash;
   const params = {
     batch: dq.batch, department: dq.department, campus: dq.campus, q: dq.q,
+    sort: dq.sort || '', dir: dq.dir || '', risk: dq.risk ? '1' : '',
     page: String(dq.page), pageSize: String(dq.pageSize),
   };
   if (opts.chart === false) params.light = '1'; // auto-refresh: skip monthly/filter queries
@@ -282,7 +283,7 @@ async function loadMonthly() {
 }
 
 function resetDash() {
-  state.dash = { batch: '', department: '', campus: '', q: '', page: 1, pageSize: 100, total: 0 };
+  state.dash = { batch: '', department: '', campus: '', q: '', sort: '', dir: '', risk: false, page: 1, pageSize: 100, total: 0 };
   state.filtersFor = null;
   state.studentsSig = null; // force a repaint for the new college
   state.monthlySig = null;
@@ -323,6 +324,62 @@ function renderPager() {
 $('#filterBatch').addEventListener('change', (e) => { state.dash.batch = e.target.value; state.dash.page = 1; loadDashboard(); });
 $('#filterDept').addEventListener('change', (e) => { state.dash.department = e.target.value; state.dash.page = 1; loadDashboard(); });
 $('#filterCampus').addEventListener('change', (e) => { state.dash.campus = e.target.value; state.dash.page = 1; loadDashboard(); });
+
+// At-risk filter toggle
+$('#riskToggle').addEventListener('click', () => {
+  state.dash.risk = !state.dash.risk;
+  state.dash.page = 1;
+  $('#riskToggle').classList.toggle('btn-primary', state.dash.risk);
+  $('#riskToggle').classList.toggle('btn-ghost', !state.dash.risk);
+  loadDashboard();
+});
+
+// Sortable column headers
+document.querySelectorAll('#studentTable th.sortable').forEach((th) => th.addEventListener('click', () => {
+  const key = th.dataset.sort;
+  if (state.dash.sort === key) {
+    state.dash.dir = state.dash.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    state.dash.sort = key;
+    state.dash.dir = key === 'rank' ? 'asc' : 'desc'; // rank: lower is better
+  }
+  state.dash.page = 1;
+  state.studentsSig = null; // force repaint
+  loadDashboard();
+  markSortHeaders();
+}));
+function markSortHeaders() {
+  document.querySelectorAll('#studentTable th.sortable').forEach((th) => {
+    const active = th.dataset.sort === state.dash.sort;
+    th.dataset.arrow = active ? (state.dash.dir === 'asc' ? '▲' : '▼') : '';
+    th.classList.toggle('sorted', active);
+  });
+}
+
+// Export the current (filtered/sorted) view to Excel. Uses fetch+blob because
+// the endpoint is admin-gated and a plain link can't send the auth header.
+$('#exportBtn').addEventListener('click', async () => {
+  if (!state.collegeId) return;
+  const dq = state.dash;
+  const qs = new URLSearchParams({
+    batch: dq.batch, department: dq.department, campus: dq.campus, q: dq.q,
+    sort: dq.sort || '', dir: dq.dir || '', risk: dq.risk ? '1' : '',
+  });
+  const btn = $('#exportBtn'); const orig = btn.textContent; btn.textContent = '⏳ Exporting…'; btn.disabled = true;
+  try {
+    const res = await fetch(`/api/colleges/${state.collegeId}/export?${qs}`, {
+      headers: adminToken() ? { 'x-admin-token': adminToken() } : {},
+    });
+    if (!res.ok) throw new Error('Export failed (' + res.status + ')');
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const name = (cd.match(/filename="([^"]+)"/) || [])[1] || 'students.xlsx';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click();
+    a.remove(); URL.revokeObjectURL(url);
+  } catch (e) { alert(e.message); }
+  btn.textContent = orig; btn.disabled = false;
+});
 $('#prevPage').addEventListener('click', () => { if (state.dash.page > 1) { state.dash.page--; loadDashboard(); } });
 $('#nextPage').addEventListener('click', () => {
   const pages = Math.max(1, Math.ceil(state.dash.total / state.dash.pageSize));
@@ -363,21 +420,23 @@ function renderStudents(students) {
   const sig = JSON.stringify(rows.map((s) => [s.id, s.classRank, s.name, s.username, s.section, s.department,
     s.ranking, s.baseline_ranking, s.solved_easy, s.solved_medium, s.solved_hard, s.solved_total,
     s.baseline_easy, s.baseline_medium, s.baseline_hard, s.baseline_total, s.practiceCompleted, s.practiceTotal,
-    s.sync_status, s.last_synced_at]));
+    s.sync_status, s.sync_error, s.last_synced_at, s.at_risk]));
   if (sig === state.studentsSig) return;
   state.studentsSig = sig;
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty">No students match.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">No students match.</td></tr>';
+    updateBulkBar();
     return;
   }
   tbody.innerHTML = rows.map((s) => `
     <tr data-id="${s.id}">
+      <td><input type="checkbox" class="row-sel" data-id="${s.id}"${selectedStudents.has(s.id) ? ' checked' : ''} /></td>
       <td>${rankCell(s.classRank)}</td>
       <td>
         <div class="s-cell">
           <div class="s-av" style="background:${avColor(s.name)}">${esc(avInitial(s.name))}</div>
           <div>
-            <div class="s-name">${esc(s.name)}</div>
+            <div class="s-name">${esc(s.name)}${s.at_risk ? ' <span class="risk-badge" title="Inactive: no new problems solved since tracking began">⚠ inactive</span>' : ''}</div>
             <div class="s-user">@${esc(s.username)}</div>
             ${(s.section || s.department) ? `<div class="s-tags">${s.section ? `<span class="tag">${esc(s.section)}</span>` : ''}${s.department ? `<span class="tag">${esc(s.department)}</span>` : ''}</div>` : ''}
           </div>
@@ -387,13 +446,13 @@ function renderStudents(students) {
       <td>${difficultyCell(s)}</td>
       <td><span class="tot">${s.solved_total}</span>${gain(s.solved_total, s.baseline_total)}</td>
       <td>${practiceCell(s)}</td>
-      <td><span class="dot ${s.sync_status}"></span>${fmtAgo(s.last_synced_at)}</td>
+      <td><span class="dot ${s.sync_status}"></span>${fmtAgo(s.last_synced_at)}${s.sync_status === 'error' ? ` <span class="cross" title="${esc(s.sync_error || 'sync failed')}">⚠</span>` : ''}</td>
       <td><button class="btn btn-sm btn-ghost sync-one" data-id="${s.id}">⟳</button></td>
     </tr>`).join('');
 
   tbody.querySelectorAll('tr[data-id]').forEach((tr) => {
     tr.addEventListener('click', (e) => {
-      if (e.target.closest('.sync-one')) return;
+      if (e.target.closest('.sync-one') || e.target.closest('.row-sel')) return;
       openStudent(tr.dataset.id);
     });
   });
@@ -406,7 +465,60 @@ function renderStudents(students) {
       loadDashboard();
     });
   });
+  tbody.querySelectorAll('.row-sel').forEach((cb) => cb.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const id = Number(cb.dataset.id);
+    cb.checked ? selectedStudents.add(id) : selectedStudents.delete(id);
+    updateBulkBar();
+  }));
+  updateBulkBar();
 }
+
+// ---- Bulk select students ---------------------------------------------------
+const selectedStudents = new Set();
+function updateBulkBar() {
+  const bar = $('#bulkBar'); if (!bar) return;
+  const n = selectedStudents.size;
+  bar.style.display = n ? 'flex' : 'none';
+  if (n) $('#bulkCount').textContent = `${n} selected`;
+  const all = $('#selAll');
+  if (all) {
+    const boxes = document.querySelectorAll('#studentTable .row-sel');
+    all.checked = boxes.length > 0 && [...boxes].every((b) => b.checked);
+  }
+}
+$('#selAll')?.addEventListener('change', (e) => {
+  document.querySelectorAll('#studentTable .row-sel').forEach((cb) => {
+    cb.checked = e.target.checked;
+    const id = Number(cb.dataset.id);
+    e.target.checked ? selectedStudents.add(id) : selectedStudents.delete(id);
+  });
+  updateBulkBar();
+});
+$('#bulkClear')?.addEventListener('click', () => {
+  selectedStudents.clear();
+  document.querySelectorAll('#studentTable .row-sel').forEach((cb) => { cb.checked = false; });
+  updateBulkBar();
+});
+$('#bulkSync')?.addEventListener('click', async () => {
+  const ids = [...selectedStudents];
+  if (!ids.length) return;
+  const btn = $('#bulkSync'); btn.disabled = true; btn.textContent = '⟳ Syncing…';
+  for (const id of ids) { try { await api(`/students/${id}/sync`, { method: 'POST' }); } catch {} }
+  btn.disabled = false; btn.textContent = '⟳ Sync selected';
+  loadDashboard();
+});
+$('#bulkDelete')?.addEventListener('click', async () => {
+  const ids = [...selectedStudents];
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} selected student(s)? This can’t be undone.`)) return;
+  const btn = $('#bulkDelete'); btn.disabled = true; btn.textContent = '🗑 Deleting…';
+  for (const id of ids) { try { await api(`/students/${id}`, { method: 'DELETE' }); } catch {} }
+  selectedStudents.clear();
+  btn.disabled = false; btn.textContent = '🗑 Delete selected';
+  state.studentsSig = null;
+  loadDashboard();
+});
 let searchTimer = null;
 $('#studentSearch').addEventListener('input', (e) => {
   clearTimeout(searchTimer);
@@ -462,11 +574,12 @@ async function openStudent(id) {
       <table><thead><tr><th>Month</th><th>Easy</th><th>Med</th><th>Hard</th><th>Total</th></tr></thead>
       <tbody>${growth.map((g) => `<tr><td>${g.ym}</td><td>${g.easy}</td><td>${g.medium}</td><td>${g.hard}</td><td><b>${g.total}</b></td></tr>`).join('')}</tbody></table>
       <p class="hint">Computed from snapshot diffs — accumulates as the app keeps running.</p>` : ''}
-    <h2 style="margin-top:18px">Practice problems</h2>
-    <table><thead><tr><th>Problem</th><th>Status</th></tr></thead><tbody>
-      ${d.practice.length ? d.practice.map((p) => `<tr><td><a href="${esc(p.url)}" target="_blank">${esc(p.title)}</a></td>
-        <td>${p.completed ? '<span class="check">✓ solved</span>' : '<span class="cross">pending</span>'}</td></tr>`).join('')
-        : '<tr><td colspan="2" class="empty">No problems assigned.</td></tr>'}
+    <h2 style="margin-top:18px">Practice problems <span class="hint">(you can manually mark/unmark)</span></h2>
+    <table><thead><tr><th>Problem</th><th>Status</th><th></th></tr></thead><tbody>
+      ${d.practice.length ? d.practice.map((p) => `<tr><td><a href="${esc(p.url)}" target="_blank">${esc(p.title)}</a>${dueLabel(p.due_date)}</td>
+        <td>${p.completed ? '<span class="check">✓ solved</span>' : '<span class="cross">pending</span>'}</td>
+        <td><button class="btn btn-sm ${p.completed ? 'btn-ghost' : 'btn-primary'} toggle-comp" data-pid="${p.id}" data-done="${p.completed ? 1 : 0}">${p.completed ? 'Unmark' : 'Mark done'}</button></td></tr>`).join('')
+        : '<tr><td colspan="3" class="empty">No problems assigned.</td></tr>'}
     </tbody></table>
     <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px">
       <button class="btn btn-sm btn-danger del-student" data-id="${s.id}" data-name="${esc(s.name)}">Delete this student</button>
@@ -479,6 +592,16 @@ async function openStudent(id) {
     data: { labels: m.map((x) => x.ym), datasets: [{ data: m.map((x) => x.submissions), borderColor: '#ffa116', backgroundColor: 'rgba(255,161,22,.15)', fill: true, tension: .3 }] },
     options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } },
   });
+
+  $('#drawerContent').querySelectorAll('.toggle-comp').forEach((b) => b.addEventListener('click', async () => {
+    const pid = b.dataset.pid, done = b.dataset.done === '1';
+    b.disabled = true;
+    try {
+      await api(`/students/${id}/completions/${pid}`, { method: done ? 'DELETE' : 'POST' });
+      state.studentsSig = null; // dashboard counts changed
+      openStudent(id); // re-render the drawer with the new state
+    } catch (e) { b.disabled = false; }
+  }));
 
   const ds = $('#drawerContent').querySelector('.del-student');
   if (ds) ds.addEventListener('click', async () => {
@@ -534,6 +657,14 @@ const sortGroups = (a, b) => (a === 'Uncategorized' ? 1 : b === 'Uncategorized' 
 const collapsedDomains = new Set(); // domains folded in the practice list
 const collapsedTopics = new Set(); // topics folded (keyed by domain|topic)
 
+// Small deadline pill: red when the due date has passed, muted otherwise.
+function dueLabel(due) {
+  if (!due) return '';
+  const today = new Date().toISOString().slice(0, 10);
+  const overdue = due < today;
+  return ` <span class="due-pill${overdue ? ' overdue' : ''}" title="Deadline">⏰ ${esc(due)}${overdue ? ' · overdue' : ''}</span>`;
+}
+
 let practiceAbort = null;
 async function loadPractice() {
   const cid = practiceCid();
@@ -558,12 +689,13 @@ function renderPracticeData(d) {
   // Skip the rebuild when nothing relevant changed (no flicker on auto-refresh).
   const sig = JSON.stringify([
     d.studentCount, d.domains, d.topics, state.practiceDomain, [...collapsedDomains], [...collapsedTopics],
-    d.problems.map((p) => [p.id, p.title, p.difficulty, p.topic, p.domain, p.completedCount]),
+    d.problems.map((p) => [p.id, p.title, p.difficulty, p.topic, p.domain, p.completedCount, p.due_date, p.video_url]),
   ]);
   if (sig === state.practiceSig) return;
   state.practiceSig = sig;
 
   renderCompletionDist(d);
+  renderHardest(d);
   state.showVideo = !!d.showVideo;
   setVideoToggleLabel();
   const tbody = $('#practiceTable').querySelector('tbody');
@@ -603,7 +735,7 @@ function renderPracticeData(d) {
   const rowHtml = (p) => {
     const pct = d.studentCount ? Math.round((p.completedCount / d.studentCount) * 100) : 0;
     return `<tr>
-      <td><a href="${esc(p.url)}" target="_blank">${esc(p.title)}</a>${p.video_url ? ` <a href="${esc(p.video_url)}" target="_blank" class="vid-link" title="YouTube video">▶ video</a>` : ''}</td>
+      <td><a href="${esc(p.url)}" target="_blank">${esc(p.title)}</a>${p.video_url ? ` <button class="vid-link" data-video="${esc(p.video_url)}" title="YouTube video">▶ video</button>` : ''}${dueLabel(p.due_date)}</td>
       <td>${p.difficulty ? `<span class="pill ${(p.difficulty || '').toLowerCase()}">${esc(p.difficulty)}</span>` : '—'}</td>
       <td>${p.completedCount}/${d.studentCount}</td>
       <td><span class="progress"><span style="width:${pct}%"></span></span> ${pct}%</td>
@@ -665,6 +797,23 @@ function renderPracticeData(d) {
     await api(`/practice/${b.dataset.id}`, { method: 'DELETE' });
     loadPractice();
   }));
+}
+
+// ---- Hardest questions (lowest completion %) --------------------------------
+function renderHardest(d) {
+  const el = $('#hardestList');
+  if (!el) return;
+  const n = d.studentCount || 0;
+  if (!n || !d.problems.length) { el.innerHTML = '<p class="hint" style="margin:0">No data yet.</p>'; return; }
+  const ranked = d.problems
+    .map((p) => ({ ...p, pct: Math.round(((p.completedCount || 0) / n) * 100) }))
+    .sort((a, b) => a.pct - b.pct || (a.completedCount || 0) - (b.completedCount || 0))
+    .slice(0, 8);
+  el.innerHTML = ranked.map((p) => `<div class="dist-row" style="cursor:default">
+      <span class="dist-label"><a href="${esc(p.url)}" target="_blank">${esc(p.title)}</a>${p.topic ? ` <span class="hint">· ${esc(p.topic)}</span>` : ''}</span>
+      <span class="dist-bar"><span style="width:${p.pct}%"></span></span>
+      <span class="dist-num">${p.completedCount || 0}/${n} <span class="hint">(${p.pct}%)</span></span>
+    </div>`).join('');
 }
 
 // ---- Completion breakdown (how many students solved how many questions) -----
@@ -871,12 +1020,13 @@ $('#addSingleBtn').addEventListener('click', async () => {
   const topic = $('#singleTopic').value.trim();
   const difficulty = $('#singleDifficulty').value;
   const video = $('#singleVideo').value.trim();
+  const dueDate = $('#singleDue').value;
   if (!practiceCid()) return setMsg('#singleMsg', 'Pick a college first.', 'err');
   if (!link) return setMsg('#singleMsg', 'Enter a LeetCode link or slug.', 'err');
   try {
     const r = await api(`/colleges/${practiceCid()}/practice`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ links: link, topic, domain, difficulty, video }),
+      body: JSON.stringify({ links: link, topic, domain, difficulty, video, dueDate }),
     });
     if (r.added) {
       setMsg('#singleMsg', `Added.`, 'ok', 5000);
@@ -894,11 +1044,12 @@ $('#addPracticeBtn').addEventListener('click', async () => {
   const domain = $('#practiceDomain').value.trim();
   const topic = $('#practiceTopic').value.trim();
   const difficulty = $('#practiceDifficulty').value;
+  const dueDate = $('#practiceDue').value;
   if (!practiceCid()) return setMsg('#practiceMsg', 'Pick a college first.', 'err');
   if (!links.trim()) return setMsg('#practiceMsg', 'Paste at least one link.', 'err');
   try {
     const r = await api(`/colleges/${practiceCid()}/practice`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ links, videos, topic, domain, difficulty }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ links, videos, topic, domain, difficulty, dueDate }),
     });
     setMsg('#practiceMsg', `Added ${r.added} problem(s)${topic ? ' under “' + topic + '”' : ''}.` + (r.skipped.length ? ` Skipped ${r.skipped.length}.` : ''), 'ok', 5000);
     $('#practiceLinks').value = ''; $('#practiceVideos').value = '';
@@ -982,6 +1133,45 @@ function setMsg(sel, text, cls, autoMs) {
   if (autoMs) el._clearTimer = setTimeout(() => { el.textContent = ''; el.className = 'msg'; }, autoMs);
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// ---- Inline YouTube player -------------------------------------------------
+function ytEmbed(url) {
+  if (!url) return null;
+  let id = null;
+  try {
+    const u = new URL(url, location.href);
+    if (u.hostname.includes('youtu.be')) id = u.pathname.slice(1);
+    else if (u.searchParams.get('v')) id = u.searchParams.get('v');
+    else if (u.pathname.includes('/embed/')) id = u.pathname.split('/embed/')[1];
+    else if (u.pathname.includes('/shorts/')) id = u.pathname.split('/shorts/')[1];
+  } catch {}
+  if (!id) return null;
+  id = id.split(/[/?&]/)[0];
+  return 'https://www.youtube.com/embed/' + encodeURIComponent(id) + '?autoplay=1&rel=0';
+}
+function openVideoModal(url) {
+  const embed = ytEmbed(url);
+  if (!embed) { window.open(url, '_blank', 'noopener'); return; }
+  let m = document.getElementById('videoModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'videoModal'; m.className = 'video-modal';
+    m.innerHTML = '<div class="video-modal-inner"><button class="video-modal-close" aria-label="Close">✕</button><div class="video-frame"></div></div>';
+    document.body.appendChild(m);
+    m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('.video-modal-close')) closeVideoModal(); });
+  }
+  m.querySelector('.video-frame').innerHTML = `<iframe src="${embed}" allow="autoplay; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
+  m.classList.add('open');
+}
+function closeVideoModal() {
+  const m = document.getElementById('videoModal');
+  if (m) { m.querySelector('.video-frame').innerHTML = ''; m.classList.remove('open'); }
+}
+document.addEventListener('click', (e) => {
+  const v = e.target.closest('[data-video]');
+  if (v) { e.preventDefault(); openVideoModal(v.getAttribute('data-video')); }
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeVideoModal(); });
 
 // Progress since first tracked. `gain` for solved counts (up is good),
 // `rankDelta` for global rank (a smaller number is better).
@@ -1068,6 +1258,12 @@ $('#adminLogout').addEventListener('click', async () => {
 (async function boot() {
   let authRequired = false;
   try { authRequired = (await fetch('/api/admin/status').then((r) => r.json())).authRequired; } catch {}
+  // Show which DB is actually live (Supabase vs local SQLite).
+  try {
+    const m = await fetch('/api/meta').then((r) => r.json());
+    const el = $('#dbDriver');
+    if (el) { el.textContent = 'DB: ' + m.driver; el.classList.add(m.driverKey === 'supabase' ? 'ok' : 'warn'); }
+  } catch {}
   if (authRequired && !adminToken()) { showAdminLogin(); return; }
   if (authRequired) $('#adminLogout').style.display = 'inline-block';
   loadColleges();

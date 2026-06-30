@@ -109,6 +109,9 @@ if (!problemCols.some((c) => c.name === 'domain')) {
 if (!problemCols.some((c) => c.name === 'video_url')) {
   db.exec('ALTER TABLE practice_problems ADD COLUMN video_url TEXT');
 }
+if (!problemCols.some((c) => c.name === 'due_date')) {
+  db.exec('ALTER TABLE practice_problems ADD COLUMN due_date TEXT'); // ISO yyyy-mm-dd, nullable
+}
 // Denormalize college_id onto monthly_activity so the whole-college chart is a
 // single indexed scan instead of a per-student join. Backfill existing rows.
 const maCols = db.prepare('PRAGMA table_info(monthly_activity)').all();
@@ -229,16 +232,34 @@ function studentWhere(collegeId, f = {}) {
   return { where: cond.join(' AND '), params };
 }
 
-// Paginated + filtered student list. Returns { rows, total, offset }.
+// At-risk = tracked for at least a week but zero solved-growth since the first
+// snapshot (i.e. the student hasn't solved anything new while being tracked).
+const RISK_SQL = "(baseline_at IS NOT NULL AND baseline_at <= datetime('now','-7 days') AND (solved_total - COALESCE(baseline_total,0)) <= 0)";
+
+function studentOrderBy(f) {
+  const dir = f.dir === 'asc' ? 'ASC' : f.dir === 'desc' ? 'DESC' : null;
+  switch (f.sort) {
+    case 'name': return `name ${dir || 'ASC'}`;
+    case 'rank': return `(ranking IS NULL), ranking ${dir || 'ASC'}, name`;
+    case 'practice': return `(SELECT COUNT(*) FROM practice_completions pc WHERE pc.student_id = students.id) ${dir || 'DESC'}, name`;
+    case 'total':
+    default: return `solved_total ${dir || 'DESC'}, name`;
+  }
+}
+
+// Paginated + filtered student list. Supports sort (f.sort/f.dir), an at-risk
+// filter (f.risk), and an unpaginated export mode (f.all). Returns { rows, total, offset }.
 export async function getStudentsPage(collegeId, f = {}) {
   const { where, params } = studentWhere(collegeId, f);
-  const pageSize = Math.min(500, Math.max(1, f.pageSize || 100));
+  const fullWhere = f.risk ? `${where} AND ${RISK_SQL}` : where;
+  const total = db.prepare(`SELECT COUNT(*) AS c FROM students WHERE ${fullWhere}`).get(...params).c;
+  const all = f.all === true || f.all === '1';
+  const pageSize = all ? total || 1 : Math.min(500, Math.max(1, f.pageSize || 100));
   const page = Math.max(1, f.page || 1);
-  const offset = (page - 1) * pageSize;
-  const total = db.prepare(`SELECT COUNT(*) AS c FROM students WHERE ${where}`).get(...params).c;
-  const rows = db
-    .prepare(`SELECT * FROM students WHERE ${where} ORDER BY solved_total DESC, name LIMIT ? OFFSET ?`)
-    .all(...params, pageSize, offset);
+  const offset = all ? 0 : (page - 1) * pageSize;
+  const sql = `SELECT *, ${RISK_SQL} AS at_risk FROM students WHERE ${fullWhere} ORDER BY ${studentOrderBy(f)}`
+    + (all ? '' : ' LIMIT ? OFFSET ?');
+  const rows = all ? db.prepare(sql).all(...params) : db.prepare(sql).all(...params, pageSize, offset);
   return { rows, total, offset };
 }
 
@@ -276,6 +297,9 @@ export async function getFilterOptions(collegeId) {
 }
 
 export const getAllStudents = async () => db.prepare('SELECT * FROM students').all();
+// The N students least-recently synced (never-synced first) — for staggered refresh.
+export const getStaleStudents = async (limit) =>
+  db.prepare('SELECT * FROM students ORDER BY last_synced_at ASC LIMIT ?').all(limit);
 // A student's rank within their college by total solved (ties share a rank).
 export const getRankInCollege = async (collegeId, solvedTotal) =>
   db.prepare('SELECT COUNT(*) AS c FROM students WHERE college_id=? AND solved_total > ?')
@@ -401,16 +425,17 @@ export async function getMonthlySolvedGrowth(studentId) {
 
 // ---- Practice helpers -------------------------------------------------------
 
-export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic, domain, video_url }) {
+export async function addPracticeProblem({ college_id, title, slug, url, difficulty, topic, domain, video_url, due_date }) {
   const stmt = db.prepare(`
-    INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic, domain, video_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO practice_problems(college_id, title, slug, url, difficulty, topic, domain, video_url, due_date)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(college_id, slug) DO UPDATE SET
       title=excluded.title, url=excluded.url, difficulty=excluded.difficulty,
       topic=excluded.topic, domain=excluded.domain,
-      video_url=COALESCE(excluded.video_url, practice_problems.video_url)
+      video_url=COALESCE(excluded.video_url, practice_problems.video_url),
+      due_date=COALESCE(excluded.due_date, practice_problems.due_date)
     RETURNING id`);
-  return stmt.get(college_id, title, slug, url, difficulty, topic ?? null, domain ?? null, video_url ?? null).id;
+  return stmt.get(college_id, title, slug, url, difficulty, topic ?? null, domain ?? null, video_url ?? null, due_date ?? null).id;
 }
 
 // Per-college toggle for showing video links in the student/shared views.
@@ -483,6 +508,12 @@ export async function markCompletion(studentId, problemId, solvedTimestamp) {
     INSERT OR IGNORE INTO practice_completions(student_id, problem_id, solved_timestamp)
     VALUES (?,?,?)`).run(studentId, problemId, solvedTimestamp ?? null);
   return r.changes > 0; // true if newly inserted
+}
+
+// Manual admin override: remove a single completion record.
+export async function unmarkCompletion(studentId, problemId) {
+  return db.prepare('DELETE FROM practice_completions WHERE student_id=? AND problem_id=?')
+    .run(studentId, problemId).changes > 0;
 }
 
 export const getCompletionsForCollege = async (collegeId) =>

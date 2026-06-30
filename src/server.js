@@ -24,8 +24,9 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", "'unsafe-inline'", 'https://cdn.jsdelivr.net'],
       styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", 'data:'],
+      imgSrc: ["'self'", 'data:', 'https://i.ytimg.com'],
       connectSrc: ["'self'"],
+      frameSrc: ["'self'", 'https://www.youtube.com', 'https://www.youtube-nocookie.com'], // embedded video player
       frameAncestors: ["'none'"],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
@@ -33,6 +34,9 @@ app.use(helmet({
   },
   crossOriginResourcePolicy: { policy: 'cross-origin' }, // let the Chrome extension fetch the API
   crossOriginEmbedderPolicy: false,
+  // Send the origin (not "no-referrer") so embedded YouTube can verify the host
+  // — otherwise the player fails with "Error 153".
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
 }));
 
 app.use(express.json({ limit: '8mb' })); // ingest payloads can be large

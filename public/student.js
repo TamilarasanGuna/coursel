@@ -357,7 +357,7 @@ function renderPractice(p, domainOrder, topicOrder) {
   lastPractice = p; lastDomainOrder = domainOrder || lastDomainOrder; lastTopicOrder = topicOrder || lastTopicOrder;
   // Skip the rebuild when nothing relevant changed (no flicker on the 10s refresh).
   const sig = JSON.stringify([lastDomainOrder, lastTopicOrder, studentDomain, [...collapsedDomains], [...collapsedTopics],
-    p.map((x) => [x.id, x.title, x.difficulty, x.topic, x.domain, x.completed, x.video_url])]);
+    p.map((x) => [x.id, x.title, x.difficulty, x.topic, x.domain, x.completed, x.video_url, x.due_date, x.completed_at])]);
   if (sig === renderPractice._sig) return;
   renderPractice._sig = sig;
   const domCmp = mkOrderCmp(lastDomainOrder), topCmp = mkOrderCmp(lastTopicOrder);
@@ -374,11 +374,23 @@ function renderPractice(p, domainOrder, topicOrder) {
   const dom = (x) => (x.domain && x.domain.trim()) || 'Uncategorized';
   const top = (x) => (x.topic && x.topic.trim()) || 'Uncategorized';
 
+  // Deadline status pill for a problem (on-time / late / due / overdue).
+  const stuDue = (x) => {
+    if (!x.due_date) return '';
+    const today = new Date().toISOString().slice(0, 10);
+    if (x.completed) {
+      const onTime = !x.completed_at || String(x.completed_at).slice(0, 10) <= x.due_date;
+      return ` <span class="due-pill ${onTime ? 'ontime' : 'late'}">${onTime ? '✓ on time' : '⚠ late'}</span>`;
+    }
+    const overdue = x.due_date < today;
+    return ` <span class="due-pill ${overdue ? 'overdue' : ''}">⏰ due ${esc(x.due_date)}${overdue ? ' · overdue' : ''}</span>`;
+  };
+
   const item = (x) => `<div class="stu-prac">
     <div class="stu-badge ${x.completed ? 'done' : 'todo'}">${x.completed ? '✓' : '•'}</div>
-    <div class="stu-prac-title"><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a></div>
+    <div class="stu-prac-title"><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>${stuDue(x)}</div>
     ${x.difficulty ? `<span class="pill ${(x.difficulty || '').toLowerCase()}">${esc(x.difficulty)}</span>` : ''}
-    ${x.video_url ? `<a class="btn btn-sm btn-ghost stu-vid" href="${esc(x.video_url)}" target="_blank" rel="noopener" title="Watch explanation">▶ Video</a>` : ''}
+    ${x.video_url ? `<button class="btn btn-sm btn-ghost stu-vid" data-video="${esc(x.video_url)}" title="Watch explanation">▶ Video</button>` : ''}
     <a class="btn btn-sm ${x.completed ? 'btn-ghost' : 'btn-primary'}" href="${esc(x.url)}" target="_blank" rel="noopener">${x.completed ? 'Review' : 'Solve →'}</a>
   </div>`;
 
@@ -447,6 +459,45 @@ function renderPractice(p, domainOrder, topicOrder) {
 // ---- helpers ----------------------------------------------------------------
 function setMsg(sel, text, cls) { const el = $(sel); el.textContent = text; el.className = 'msg ' + (cls || ''); }
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// ---- Inline YouTube player -------------------------------------------------
+function ytEmbed(url) {
+  if (!url) return null;
+  let id = null;
+  try {
+    const u = new URL(url, location.href);
+    if (u.hostname.includes('youtu.be')) id = u.pathname.slice(1);
+    else if (u.searchParams.get('v')) id = u.searchParams.get('v');
+    else if (u.pathname.includes('/embed/')) id = u.pathname.split('/embed/')[1];
+    else if (u.pathname.includes('/shorts/')) id = u.pathname.split('/shorts/')[1];
+  } catch {}
+  if (!id) return null;
+  id = id.split(/[/?&]/)[0];
+  return 'https://www.youtube.com/embed/' + encodeURIComponent(id) + '?autoplay=1&rel=0';
+}
+function openVideoModal(url) {
+  const embed = ytEmbed(url);
+  if (!embed) { window.open(url, '_blank', 'noopener'); return; } // not YouTube — fall back to new tab
+  let m = document.getElementById('videoModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'videoModal'; m.className = 'video-modal';
+    m.innerHTML = '<div class="video-modal-inner"><button class="video-modal-close" aria-label="Close">✕</button><div class="video-frame"></div></div>';
+    document.body.appendChild(m);
+    m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('.video-modal-close')) closeVideoModal(); });
+  }
+  m.querySelector('.video-frame').innerHTML = `<iframe src="${embed}" allow="autoplay; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
+  m.classList.add('open');
+}
+function closeVideoModal() {
+  const m = document.getElementById('videoModal');
+  if (m) { m.querySelector('.video-frame').innerHTML = ''; m.classList.remove('open'); } // clearing the iframe stops playback
+}
+document.addEventListener('click', (e) => {
+  const v = e.target.closest('[data-video]');
+  if (v) { e.preventDefault(); openVideoModal(v.getAttribute('data-video')); }
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeVideoModal(); });
 
 // ---- boot -------------------------------------------------------------------
 (async function boot() {

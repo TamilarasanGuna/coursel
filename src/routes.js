@@ -37,7 +37,7 @@ const videoShown = (col) => !(col && (col.show_video === 0 || col.show_video ===
 function isPublicReq(req) {
   const p = req.path, m = req.method;
   if (m === 'OPTIONS') return true;
-  if (p === '/admin/login' || p === '/admin/status' || p === '/admin/logout') return true;
+  if (p === '/admin/login' || p === '/admin/status' || p === '/admin/logout' || p === '/meta') return true;
   if (m === 'GET' && (p === '/template' || p === '/practice-template')) return true; // blank downloads, no data
   if (m === 'GET' && p === '/colleges') return true;                       // student login dropdown
   if (m === 'GET' && /^\/colleges\/\d+\/options$/.test(p)) return true;    // student register dropdowns
@@ -55,6 +55,12 @@ router.use((req, res, next) => {
 });
 
 router.get('/admin/status', (req, res) => res.json({ authRequired: !!config.adminPassword }));
+
+// Which database is actually live (so the admin can confirm Supabase vs local SQLite).
+router.get('/meta', (req, res) => res.json({
+  driver: config.dbDriver === 'supabase' ? 'Supabase (Postgres)' : 'SQLite (local)',
+  driverKey: config.dbDriver === 'supabase' ? 'supabase' : 'sqlite',
+}));
 
 router.post('/admin/login', adminLoginLimiter, (req, res) => {
   if (!config.adminPassword) return res.json({ ok: true, authRequired: false, token: '' });
@@ -87,6 +93,19 @@ const titleize = (slug) =>
 
 // Email is used for login only — never send it to the browser (admin or shared link).
 const omitEmail = (s) => { const { email, ...rest } = s; return rest; };
+
+// Normalize a deadline input (ISO string, date, or Excel serial) to 'yyyy-mm-dd' or null.
+function normDate(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') { // Excel serial date
+    const d = new Date(Date.UTC(1899, 11, 30) + v * 86400000);
+    return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  }
+  const s = String(v).trim();
+  if (!s) return null;
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+}
 
 // Find a value in a row object by trying several header aliases (case-insensitive).
 function pick(row, aliases) {
@@ -155,6 +174,9 @@ router.get('/view/:token', h(async (req, res) => {
     department: (req.query.department || '').trim(),
     campus: (req.query.campus || '').trim(),
     q: (req.query.q || '').trim(),
+    sort: (req.query.sort || '').trim(),
+    dir: (req.query.dir || '').trim(),
+    risk: req.query.risk === '1',
     page: Math.max(1, Number(req.query.page) || 1),
     pageSize: Math.min(500, Math.max(1, Number(req.query.pageSize) || 100)),
   };
@@ -205,6 +227,7 @@ router.get('/view/:token', h(async (req, res) => {
       topic: p.topic || null,
       domain: p.domain || null,
       video_url: videoShown(c) ? (p.video_url || null) : null,
+      due_date: p.due_date || null,
       completedCount: problemCounts[p.id] || 0,
     })),
   });
@@ -373,6 +396,7 @@ router.get('/student/:studentId/dashboard', h(async (req, res) => {
       topic: p.topic || null,
       domain: p.domain || null,
       video_url: showVideo ? (p.video_url || null) : null,
+      due_date: p.due_date || null,
       completed: compIds.has(p.id),
       completed_at: completions.find((c) => c.problem_id === p.id)?.completed_at || null,
     })),
@@ -435,6 +459,9 @@ router.get('/colleges/:id/dashboard', h(async (req, res) => {
     department: (req.query.department || '').trim(),
     campus: (req.query.campus || '').trim(),
     q: (req.query.q || '').trim(),
+    sort: (req.query.sort || '').trim(),
+    dir: (req.query.dir || '').trim(),
+    risk: req.query.risk === '1',
     page: Math.max(1, Number(req.query.page) || 1),
     pageSize: Math.min(500, Math.max(1, Number(req.query.pageSize) || 100)),
   };
@@ -462,6 +489,51 @@ router.get('/colleges/:id/dashboard', h(async (req, res) => {
   }));
 
   res.json({ students, practiceTotal, totals, monthly: [], filters, page: f.page, pageSize: f.pageSize, total });
+}));
+
+// Export the (filtered/sorted) student roster + stats + practice completion to Excel.
+router.get('/colleges/:id/export', h(async (req, res) => {
+  const collegeId = Number(req.params.id);
+  const f = {
+    batch: (req.query.batch || '').trim(),
+    department: (req.query.department || '').trim(),
+    campus: (req.query.campus || '').trim(),
+    q: (req.query.q || '').trim(),
+    sort: (req.query.sort || '').trim(),
+    dir: (req.query.dir || '').trim(),
+    risk: req.query.risk === '1',
+    all: true,
+  };
+  const [college, practiceTotal, pageData] = await Promise.all([
+    store.getCollege(collegeId),
+    store.countPracticeProblems(collegeId),
+    store.getStudentsPage(collegeId, f),
+  ]);
+  const rows = pageData.rows;
+  const counts = await store.getCompletedCountsForStudents(rows.map((s) => s.id));
+
+  const header = ['#', 'Name', 'Username', 'Register Number', 'Email', 'Department', 'Batch / Section',
+    'Year', 'Campus', 'Global Rank', 'Easy', 'Medium', 'Hard', 'Total Solved', 'Solved Since Start',
+    'Practice Completed', 'Practice Total', 'Inactive', 'Profile Found', 'Sync Status', 'Last Synced'];
+  const aoa = [header];
+  rows.forEach((s, i) => {
+    const sinceStart = (s.baseline_total != null) ? (s.solved_total - s.baseline_total) : '';
+    aoa.push([
+      i + 1, s.name || '', s.username || '', s.register_number || '', s.email || '', s.department || '',
+      s.section || '', s.year || '', s.campus || '', s.ranking || '', s.solved_easy || 0, s.solved_medium || 0,
+      s.solved_hard || 0, s.solved_total || 0, sinceStart, counts[s.id] || 0, practiceTotal,
+      s.at_risk ? 'Yes' : 'No', s.found ? 'Yes' : 'No', s.sync_status || '', s.last_synced_at || '',
+    ]);
+  });
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  XLSX.utils.book_append_sheet(wb, ws, 'Students');
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const safe = (college?.name || 'college').replace(/[^a-z0-9]+/gi, '_').replace(/^_|_$/g, '');
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Disposition', `attachment; filename="${safe}_progress_${stamp}.xlsx"`);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.send(buf);
 }));
 
 // Monthly submission activity for the whole college (the dashboard chart).
@@ -519,6 +591,16 @@ router.post('/students/:id/sync', h(async (req, res) => {
 router.post('/students/:id/reset-baseline', h(async (req, res) => {
   await store.resetBaseline(Number(req.params.id));
   res.json({ ok: true });
+}));
+
+// Manual completion override (admin marks/unmarks a question for a student).
+router.post('/students/:id/completions/:problemId', h(async (req, res) => {
+  const ok = await store.markCompletion(Number(req.params.id), Number(req.params.problemId), null);
+  res.json({ ok: true, added: ok });
+}));
+router.delete('/students/:id/completions/:problemId', h(async (req, res) => {
+  const ok = await store.unmarkCompletion(Number(req.params.id), Number(req.params.problemId));
+  res.json({ ok: true, removed: ok });
 }));
 
 // ---- Practice tab -----------------------------------------------------------
@@ -583,6 +665,7 @@ router.post('/colleges/:id/practice', upload.single('file'), h(async (req, res) 
   const formDomain = (req.body.domain || '').trim() || null;
   const formDifficulty = (req.body.difficulty || '').trim() || null;
   const formVideo = (req.body.video || '').trim() || null;
+  const formDue = normDate(req.body.dueDate || req.body.due_date);
   const items = [];
 
   if (req.file) {
@@ -598,6 +681,7 @@ router.post('/colleges/:id/practice', upload.single('file'), h(async (req, res) 
         topic: pick(row, ['topic', 'category', 'tag']) || formTopic,
         domain: pick(row, ['domain', 'area', 'subject']) || formDomain,
         video: pick(row, ['video', 'video link', 'video url', 'youtube', 'youtube link']) || formVideo,
+        due: normDate(pick(row, ['deadline', 'due', 'due date', 'due_date'])) || formDue,
       });
     }
   } else {
@@ -609,7 +693,7 @@ router.post('/colleges/:id/practice', upload.single('file'), h(async (req, res) 
       const url = raw.trim();
       if (!url) return;
       const video = (videoLines[i] || '').trim() || formVideo;
-      items.push({ url, topic: formTopic, domain: formDomain, difficulty: formDifficulty, video });
+      items.push({ url, topic: formTopic, domain: formDomain, difficulty: formDifficulty, video, due: formDue });
     });
   }
 
@@ -630,6 +714,7 @@ router.post('/colleges/:id/practice', upload.single('file'), h(async (req, res) 
       topic: it.topic || null,
       domain: it.domain || null,
       video_url: it.video || null,
+      due_date: it.due || null,
     });
     added.push({ id, slug });
   }
@@ -751,10 +836,10 @@ router.get('/template', (req, res) => {
 router.get('/practice-template', (req, res) => {
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([
-    ['URL', 'Domain', 'Topic', 'Difficulty', 'Title', 'Video'],
-    ['https://leetcode.com/problems/missing-number/', 'Fundamentals of Programming', 'Array', 'Easy', 'Missing Number', 'https://youtu.be/WnPLSRLSANE'],
-    ['https://leetcode.com/problems/add-two-numbers/', 'Data Structures', 'Linked List', 'Medium', '', ''],
-    ['trapping-rain-water', 'Algorithms', 'Two Pointers', 'Hard', '', ''],
+    ['URL', 'Domain', 'Topic', 'Difficulty', 'Title', 'Video', 'Deadline'],
+    ['https://leetcode.com/problems/missing-number/', 'Fundamentals of Programming', 'Array', 'Easy', 'Missing Number', 'https://youtu.be/WnPLSRLSANE', '2026-07-15'],
+    ['https://leetcode.com/problems/add-two-numbers/', 'Data Structures', 'Linked List', 'Medium', '', '', ''],
+    ['trapping-rain-water', 'Algorithms', 'Two Pointers', 'Hard', '', '', ''],
   ]);
   XLSX.utils.book_append_sheet(wb, ws, 'Problems');
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });

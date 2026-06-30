@@ -5,7 +5,7 @@ let chart = null, drawerChart = null, lastMonthlySig = null, filtersLoaded = fal
 let lastData = null, viewPracticeDomain = '__all';
 const collapsedDomains = new Set(); // folded domains in the practice list
 const collapsedTopics = new Set(); // folded topics (keyed by domain|topic)
-const dash = { batch: '', department: '', campus: '', q: '', page: 1, pageSize: 100, total: 0 };
+const dash = { batch: '', department: '', campus: '', q: '', risk: false, page: 1, pageSize: 100, total: 0 };
 
 function lcChartColors() {
   const cs = getComputedStyle(document.documentElement);
@@ -39,6 +39,45 @@ const api = (path) => fetch('/api' + path).then(async (r) => {
 });
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
+// ---- Inline YouTube player -------------------------------------------------
+function ytEmbed(url) {
+  if (!url) return null;
+  let id = null;
+  try {
+    const u = new URL(url, location.href);
+    if (u.hostname.includes('youtu.be')) id = u.pathname.slice(1);
+    else if (u.searchParams.get('v')) id = u.searchParams.get('v');
+    else if (u.pathname.includes('/embed/')) id = u.pathname.split('/embed/')[1];
+    else if (u.pathname.includes('/shorts/')) id = u.pathname.split('/shorts/')[1];
+  } catch {}
+  if (!id) return null;
+  id = id.split(/[/?&]/)[0];
+  return 'https://www.youtube.com/embed/' + encodeURIComponent(id) + '?autoplay=1&rel=0';
+}
+function openVideoModal(url) {
+  const embed = ytEmbed(url);
+  if (!embed) { window.open(url, '_blank', 'noopener'); return; }
+  let m = document.getElementById('videoModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'videoModal'; m.className = 'video-modal';
+    m.innerHTML = '<div class="video-modal-inner"><button class="video-modal-close" aria-label="Close">✕</button><div class="video-frame"></div></div>';
+    document.body.appendChild(m);
+    m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('.video-modal-close')) closeVideoModal(); });
+  }
+  m.querySelector('.video-frame').innerHTML = `<iframe src="${embed}" allow="autoplay; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
+  m.classList.add('open');
+}
+function closeVideoModal() {
+  const m = document.getElementById('videoModal');
+  if (m) { m.querySelector('.video-frame').innerHTML = ''; m.classList.remove('open'); }
+}
+document.addEventListener('click', (e) => {
+  const v = e.target.closest('[data-video]');
+  if (v) { e.preventDefault(); openVideoModal(v.getAttribute('data-video')); }
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeVideoModal(); });
+
 // progress helpers (same logic as admin)
 function gain(cur, base) {
   if (base == null || cur == null) return '';
@@ -60,6 +99,7 @@ async function load(opts = {}) {
   try {
     const params = {
       batch: dash.batch, department: dash.department, campus: dash.campus, q: dash.q,
+      risk: dash.risk ? '1' : '',
       page: String(dash.page), pageSize: String(dash.pageSize),
     };
     if (opts.chart === false) params.light = '1'; // auto-refresh: skip monthly/filter queries
@@ -162,7 +202,7 @@ function practiceCell(s) {
 function renderStudents(students) {
   const sig = JSON.stringify(students.map((s) => [s.id, s.classRank, s.name, s.username, s.section,
     s.department, s.found, s.ranking, s.baseline_ranking, s.solved_easy, s.solved_medium, s.solved_hard,
-    s.solved_total, s.baseline_total, s.practiceCompleted, s.practiceTotal]));
+    s.solved_total, s.baseline_total, s.practiceCompleted, s.practiceTotal, s.at_risk]));
   if (sig === renderStudents._sig) return; // skip rebuild when unchanged
   renderStudents._sig = sig;
   const tbody = $('#studentTable').querySelector('tbody');
@@ -177,7 +217,7 @@ function renderStudents(students) {
         <div class="s-cell">
           <div class="s-av" style="background:${avColor(s.name)}">${esc(avInitial(s.name))}</div>
           <div>
-            <div class="s-name">${esc(s.name)}</div>
+            <div class="s-name">${esc(s.name)}${s.at_risk ? ' <span class="risk-badge" title="Inactive: no new problems solved since tracking began">⚠ inactive</span>' : ''}</div>
             <div class="s-user">@${esc(s.username)}</div>
             ${(s.section || s.department) ? `<div class="s-tags">${s.section ? `<span class="tag">${esc(s.section)}</span>` : ''}${s.department ? `<span class="tag">${esc(s.department)}</span>` : ''}</div>` : ''}
           </div>
@@ -193,7 +233,7 @@ function renderStudents(students) {
 
 function renderPractice(d) {
   const sig = JSON.stringify([d.studentCount, d.domainOrder, d.topicOrder, viewPracticeDomain,
-    [...collapsedDomains], [...collapsedTopics], d.practice.map((p) => [p.id, p.title, p.difficulty, p.topic, p.domain, p.completedCount, p.video_url])]);
+    [...collapsedDomains], [...collapsedTopics], d.practice.map((p) => [p.id, p.title, p.difficulty, p.topic, p.domain, p.completedCount, p.video_url, p.due_date])]);
   if (sig === renderPractice._sig) return; // skip rebuild when unchanged
   renderPractice._sig = sig;
   renderViewDist(d);
@@ -219,7 +259,7 @@ function renderPractice(d) {
   const row = (p) => {
     const pct = d.studentCount ? Math.round((p.completedCount / d.studentCount) * 100) : 0;
     return `<tr>
-      <td><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>${p.video_url ? ` <a href="${esc(p.video_url)}" target="_blank" rel="noopener" class="vid-link" title="YouTube video">▶ video</a>` : ''}</td>
+      <td><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>${p.video_url ? ` <button class="vid-link" data-video="${esc(p.video_url)}" title="YouTube video">▶ video</button>` : ''}${p.due_date ? ` <span class="due-pill${p.due_date < new Date().toISOString().slice(0,10) ? ' overdue' : ''}">⏰ ${esc(p.due_date)}</span>` : ''}</td>
       <td>${p.difficulty ? `<span class="pill ${(p.difficulty || '').toLowerCase()}">${esc(p.difficulty)}</span>` : '—'}</td>
       <td>${p.completedCount}/${d.studentCount}</td>
       <td><span class="progress"><span style="width:${pct}%"></span></span> ${pct}%</td></tr>`;
@@ -417,6 +457,14 @@ $('#drawerClose').addEventListener('click', closeDrawer);
 $('#drawerBackdrop').addEventListener('click', closeDrawer);
 
 // ---- filters / pager / search ----------------------------------------------
+$('#riskToggle').addEventListener('click', () => {
+  dash.risk = !dash.risk;
+  dash.page = 1;
+  $('#riskToggle').classList.toggle('btn-primary', dash.risk);
+  $('#riskToggle').classList.toggle('btn-ghost', !dash.risk);
+  renderStudents._sig = null; // force repaint
+  load();
+});
 $('#filterBatch').addEventListener('change', (e) => { dash.batch = e.target.value; dash.page = 1; load(); });
 $('#filterDept').addEventListener('change', (e) => { dash.department = e.target.value; dash.page = 1; load(); });
 $('#filterCampus').addEventListener('change', (e) => { dash.campus = e.target.value; dash.page = 1; load(); });

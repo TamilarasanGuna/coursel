@@ -72,18 +72,31 @@
         <div class="panel-head" style="flex-wrap:wrap;gap:8px">
           <h2>Students</h2>
           <div class="row" style="margin:0;gap:8px;flex-wrap:wrap">
+            <button id="riskToggle" class="btn btn-sm btn-ghost" title="Show only inactive students (no new problems solved since tracking began)">⚠ Inactive Students</button>
             <select id="filterCampus" class="filter-sel"><option value="">All campuses</option></select>
             <select id="filterDept" class="filter-sel"><option value="">All departments</option></select>
             <select id="filterBatch" class="filter-sel"><option value="">All batches</option></select>
             <input id="studentSearch" class="search" placeholder="Search name / username / reg no…" style="width:200px" />
+            <button id="exportBtn" class="btn btn-sm btn-primary" title="Download the current view as Excel">⬇ Export Excel</button>
           </div>
+        </div>
+        <div id="bulkBar" class="bulk-bar" style="display:none">
+          <span id="bulkCount" class="hint"></span>
+          <button id="bulkSync" class="btn btn-sm btn-ghost">⟳ Sync selected</button>
+          <button id="bulkDelete" class="btn btn-sm btn-danger">🗑 Delete selected</button>
+          <button id="bulkClear" class="btn btn-sm btn-ghost">Clear</button>
         </div>
         <div class="table-wrap">
           <table id="studentTable">
             <thead>
               <tr>
-                <th>#</th><th>Student</th><th>Global rank</th><th>Easy · Medium · Hard</th>
-                <th>Total</th><th>Practice</th><th>Synced</th><th></th>
+                <th><input type="checkbox" id="selAll" title="Select all on this page" /></th>
+                <th>#</th><th>Student</th>
+                <th class="sortable" data-sort="rank">Global rank</th>
+                <th>Easy · Medium · Hard</th>
+                <th class="sortable" data-sort="total">Total</th>
+                <th class="sortable" data-sort="practice">Practice</th>
+                <th>Synced</th><th></th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -123,12 +136,13 @@
             <option>Easy</option><option>Medium</option><option>Hard</option>
           </select>
           <input id="singleVideo" class="search" autocomplete="off" placeholder="YouTube link (optional)" style="flex:1;min-width:150px" />
+          <input id="singleDue" type="date" class="search" title="Deadline (optional)" style="min-width:140px" />
           <button id="addSingleBtn" class="btn btn-primary">Add question</button>
           <span id="singleMsg" class="msg" style="margin:0"></span>
         </div>
 
         <h2 style="font-size:13px;margin:22px 0 8px">Add many at once</h2>
-        <p class="hint">Pick or type a <b>topic</b> and a <b>difficulty</b>, then paste LeetCode links (one per line). Optionally paste a YouTube link on the matching line of the <b>Video links</b> box — line 1 ↔ line 1, line 2 ↔ line 2, and so on. Or upload an Excel file with <code>URL</code> (and optionally <code>Topic</code>, <code>Difficulty</code>, <code>Video</code>) columns, which override these.</p>
+        <p class="hint">Pick or type a <b>topic</b> and a <b>difficulty</b>, then paste LeetCode links (one per line). Optionally paste a YouTube link on the matching line of the <b>Video links</b> box — line 1 ↔ line 1, line 2 ↔ line 2, and so on. Or upload an Excel file with <code>URL</code> (and optionally <code>Topic</code>, <code>Difficulty</code>, <code>Video</code>, <code>Deadline</code>) columns, which override these.</p>
         <div class="row" style="margin-top:0">
           <input id="practiceDomain" class="search" autocomplete="off" placeholder="Domain" style="flex:1;min-width:140px" />
           <input id="practiceTopic" class="search" autocomplete="off" placeholder="Topic (e.g. Array)" style="flex:1;min-width:140px" />
@@ -136,6 +150,7 @@
             <option value="">Difficulty (optional)…</option>
             <option>Easy</option><option>Medium</option><option>Hard</option>
           </select>
+          <input id="practiceDue" type="date" class="search" title="Deadline for all (optional)" style="min-width:140px" />
         </div>
         <div class="bulk-cols">
           <div>
@@ -160,6 +175,13 @@
           <span class="hint">How many students have solved how many of the assigned questions. Click a row to see who.</span>
         </div>
         <div id="completionDist" class="dist-list"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head" style="flex-wrap:wrap;gap:8px">
+          <h2>Hardest questions</h2>
+          <span class="hint">Lowest completion — where students are getting stuck.</span>
+        </div>
+        <div id="hardestList" class="dist-list"></div>
       </div>
       <div class="panel">
         <div class="panel-head">
@@ -238,6 +260,7 @@
 
   <footer class="foot">
     Data scraped from public LeetCode profiles via an unofficial endpoint — best-effort, not real-time.
+    <span id="dbDriver" class="db-badge"></span>
   </footer>
 
   <script>
