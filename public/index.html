@@ -34,6 +34,13 @@
       <label>College</label>
       <select id="collegeSelect"></select>
       <button id="syncCollegeBtn" class="btn btn-ghost" title="Refresh all students from LeetCode now">⟳ Sync now</button>
+      <button id="autoRefreshToggle" class="btn btn-ghost" title="Turn the live auto-refresh on or off (off saves bandwidth)">🔄 Auto-refresh: On</button>
+      <span id="arSchedule" class="ar-sched" title="Only auto-refresh within this time window. Leave blank to refresh all day.">
+        <span class="hint">only</span>
+        <input type="time" id="arFrom" class="ar-time" />
+        <span class="hint">–</span>
+        <input type="time" id="arTo" class="ar-time" />
+      </span>
       <a href="/student" target="_blank" class="btn btn-ghost" title="Open the student-facing view">Student view ↗</a>
       <button id="themeToggle" class="btn btn-ghost" title="Toggle light / dark">☀️</button>
       <button id="adminLogout" class="btn btn-ghost" title="Lock the admin dashboard" style="display:none">🔒 Lock</button>

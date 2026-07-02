@@ -48,7 +48,9 @@ export async function initStore() {
   pool = new pg.Pool({
     connectionString: config.supabase.connectionString,
     ssl: { rejectUnauthorized: false }, // Supabase requires SSL
-    max: 5,
+    max: Number(process.env.DB_POOL_MAX) || 15, // concurrent connections; raise for big cohorts
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
   });
   await q('SELECT 1');
   // Ensure schema exists (idempotent).

@@ -14,7 +14,10 @@ export const router = express.Router();
 
 // Throttle auth endpoints to slow brute-forcing.
 const adminLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many login attempts. Try again in a few minutes.' } });
-const studentAuthLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many attempts. Please wait a moment and retry.' } });
+// Student login/register throttle. skipSuccessfulRequests => only FAILED attempts
+// count, so a whole class on one shared campus IP can log in without being blocked;
+// only repeated bad attempts (brute-force) get throttled. Tunable via env.
+const studentAuthLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: Number(process.env.STUDENT_RATE_MAX) || 100, skipSuccessfulRequests: true, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many failed attempts. Please wait a moment and retry.' } });
 
 // ---- Admin authentication ---------------------------------------------------
 // Single shared password (config.adminPassword). Login returns a token kept in

@@ -315,3 +315,7 @@ textarea, .search, .field input {
 .video-frame { position:relative; width:100%; aspect-ratio:16/9; background:#000; border-radius:10px; overflow:hidden; box-shadow:0 12px 40px rgba(0,0,0,.5); }
 .video-frame iframe { position:absolute; inset:0; width:100%; height:100%; border:0; }
 .video-modal-close { position:absolute; top:-40px; right:0; background:transparent; border:none; color:#fff; font-size:26px; cursor:pointer; line-height:1; }
+
+/* Auto-refresh schedule inputs */
+.ar-sched { display:inline-flex; align-items:center; gap:5px; }
+.ar-time { background:var(--panel-2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:4px 6px; font-size:12px; }
