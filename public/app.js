@@ -1269,40 +1269,36 @@ $('#adminLogout').addEventListener('click', async () => {
   loadColleges();
 })();
 
-// ---- Auto-refresh toggle + time window (off / outside window = saves egress) --
-let autoRefreshOn = true;
-let arFrom = '', arTo = '';
+// ---- Auto-refresh mode: on | off | scheduled (off/off-hours saves egress) ----
+let arMode = 'on', arFrom = '', arTo = '';
 try {
-  autoRefreshOn = (localStorage.getItem('lc_autorefresh') || 'on') !== 'off';
+  arMode = localStorage.getItem('lc_ar_mode') || 'on';
   arFrom = localStorage.getItem('lc_ar_from') || '';
   arTo = localStorage.getItem('lc_ar_to') || '';
 } catch {}
 
 // True when the current time is inside the configured window (or no window set).
 function inRefreshWindow() {
-  if (!arFrom || !arTo) return true;          // no window -> always active
+  if (!arFrom || !arTo) return true;          // no window -> treat as always
   const cur = new Date().toTimeString().slice(0, 5); // "HH:MM"
   return arFrom <= arTo ? (cur >= arFrom && cur < arTo) // same-day window
     : (cur >= arFrom || cur < arTo);           // overnight window (e.g. 22:00–06:00)
 }
 // The master gate used by every auto-refresh timer.
-function autoRefreshActive() { return autoRefreshOn && inRefreshWindow(); }
-
-function updateAutoRefreshBtn() {
-  const b = $('#autoRefreshToggle'); if (!b) return;
-  const scheduled = arFrom && arTo;
-  const live = autoRefreshActive();
-  b.textContent = !autoRefreshOn ? '⏸ Auto-refresh: Off'
-    : scheduled ? (live ? '🔄 Auto-refresh: On (in window)' : '🌙 Auto-refresh: paused (off-hours)')
-    : '🔄 Auto-refresh: On';
-  b.classList.toggle('btn-primary', live);
-  b.classList.toggle('btn-ghost', !live);
-  const sched = $('#arSchedule'); if (sched) sched.style.opacity = autoRefreshOn ? '1' : '.4';
+function autoRefreshActive() {
+  if (arMode === 'off') return false;
+  if (arMode === 'scheduled') return inRefreshWindow();
+  return true; // 'on'
 }
-$('#autoRefreshToggle').addEventListener('click', () => {
-  autoRefreshOn = !autoRefreshOn;
-  try { localStorage.setItem('lc_autorefresh', autoRefreshOn ? 'on' : 'off'); } catch {}
-  updateAutoRefreshBtn();
+function updateAutoRefreshUI() {
+  const sel = $('#autoRefreshMode'); if (sel) sel.value = arMode;
+  const sched = $('#arSchedule'); if (sched) sched.style.display = arMode === 'scheduled' ? 'inline-flex' : 'none';
+  const f = $('#arFrom'), t = $('#arTo'); if (f) f.value = arFrom; if (t) t.value = arTo;
+}
+$('#autoRefreshMode').addEventListener('change', (e) => {
+  arMode = e.target.value;
+  try { localStorage.setItem('lc_ar_mode', arMode); } catch {}
+  updateAutoRefreshUI();
   if (autoRefreshActive()) { // refresh once immediately when it becomes active
     const active = document.querySelector('.tab.active')?.dataset.tab;
     if (active === 'dashboard') loadDashboard();
@@ -1311,18 +1307,14 @@ $('#autoRefreshToggle').addEventListener('click', () => {
 });
 function wireArTime(id, key, set) {
   const el = $(id); if (!el) return;
-  el.value = key === 'lc_ar_from' ? arFrom : arTo;
   el.addEventListener('change', () => {
     set(el.value);
     try { localStorage.setItem(key, el.value); } catch {}
-    updateAutoRefreshBtn();
   });
 }
 wireArTime('#arFrom', 'lc_ar_from', (v) => { arFrom = v; });
 wireArTime('#arTo', 'lc_ar_to', (v) => { arTo = v; });
-updateAutoRefreshBtn();
-// Re-evaluate the window each minute so the button/label flips at the boundary.
-setInterval(updateAutoRefreshBtn, 60000);
+updateAutoRefreshUI();
 
 // Auto-refresh the admin view every 2s so scheduler/extension updates show up
 // without a manual reload. This only re-reads the database (no LeetCode calls).
